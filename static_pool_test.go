@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -23,12 +24,13 @@ func Test_NewPool(t *testing.T) {
 		NewPipeFactory(),
 		cfg,
 	)
+	assert.NoError(t, err)
+
 	assert.Equal(t, cfg, p.Config())
 
 	defer p.Destroy()
 
 	assert.NotNil(t, p)
-	assert.NoError(t, err)
 }
 
 func Test_StaticPool_Invalid(t *testing.T) {
@@ -62,10 +64,11 @@ func Test_StaticPool_Echo(t *testing.T) {
 		NewPipeFactory(),
 		cfg,
 	)
+	assert.NoError(t, err)
+
 	defer p.Destroy()
 
 	assert.NotNil(t, p)
-	assert.NoError(t, err)
 
 	res, err := p.Exec(&Payload{Body: []byte("hello")})
 
@@ -83,10 +86,11 @@ func Test_StaticPool_Echo_NilContext(t *testing.T) {
 		NewPipeFactory(),
 		cfg,
 	)
+	assert.NoError(t, err)
+
 	defer p.Destroy()
 
 	assert.NotNil(t, p)
-	assert.NoError(t, err)
 
 	res, err := p.Exec(&Payload{Body: []byte("hello"), Context: nil})
 
@@ -104,10 +108,11 @@ func Test_StaticPool_Echo_Context(t *testing.T) {
 		NewPipeFactory(),
 		cfg,
 	)
+	assert.NoError(t, err)
+
 	defer p.Destroy()
 
 	assert.NotNil(t, p)
-	assert.NoError(t, err)
 
 	res, err := p.Exec(&Payload{Body: []byte("hello"), Context: []byte("world")})
 
@@ -125,10 +130,10 @@ func Test_StaticPool_JobError(t *testing.T) {
 		NewPipeFactory(),
 		cfg,
 	)
+	assert.NoError(t, err)
 	defer p.Destroy()
 
 	assert.NotNil(t, p)
-	assert.NoError(t, err)
 
 	res, err := p.Exec(&Payload{Body: []byte("hello")})
 
@@ -145,14 +150,16 @@ func Test_StaticPool_Broken_Replace(t *testing.T) {
 		NewPipeFactory(),
 		cfg,
 	)
-	defer p.Destroy()
-
-	assert.NotNil(t, p)
 	assert.NoError(t, err)
+	assert.NotNil(t, p)
+
+	done := make(chan interface{})
 
 	p.Listen(func(e int, ctx interface{}) {
 		if err, ok := ctx.(error); ok {
-			assert.Contains(t, err.Error(), "undefined_function()")
+			if strings.Contains(err.Error(), "undefined_function()") {
+				close(done)
+			}
 		}
 	})
 
@@ -160,7 +167,11 @@ func Test_StaticPool_Broken_Replace(t *testing.T) {
 
 	assert.Error(t, err)
 	assert.Nil(t, res)
+
+	<-done
+	p.Destroy()
 }
+
 
 func Test_StaticPool_Broken_FromOutside(t *testing.T) {
 	p, err := NewPool(
@@ -168,10 +179,10 @@ func Test_StaticPool_Broken_FromOutside(t *testing.T) {
 		NewPipeFactory(),
 		cfg,
 	)
+	assert.NoError(t, err)
 	defer p.Destroy()
 
 	assert.NotNil(t, p)
-	assert.NoError(t, err)
 
 	res, err := p.Exec(&Payload{Body: []byte("hello")})
 
@@ -191,9 +202,10 @@ func Test_StaticPool_Broken_FromOutside(t *testing.T) {
 	})
 
 	// killing random worker and expecting pool to replace it
-	p.muw.Lock()
-	p.workers[0].cmd.Process.Kill()
-	p.muw.Unlock()
+	err = p.Workers()[0].cmd.Process.Kill()
+	if err != nil {
+		t.Errorf("error killing the process: error %v", err)
+	}
 	<-destructed
 
 	for _, w := range p.Workers() {
@@ -207,26 +219,33 @@ func Test_StaticPool_AllocateTimeout(t *testing.T) {
 		NewPipeFactory(),
 		Config{
 			NumWorkers:      1,
-			AllocateTimeout: time.Millisecond * 50,
-			DestroyTimeout:  time.Second,
+			AllocateTimeout: time.Nanosecond * 1,
+			DestroyTimeout:  time.Second * 2,
 		},
 	)
-
-	assert.NotNil(t, p)
-	assert.NoError(t, err)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	done := make(chan interface{})
 	go func() {
-		_, err := p.Exec(&Payload{Body: []byte("100")})
-		assert.NoError(t, err)
-		close(done)
+		if p != nil {
+			_, err := p.Exec(&Payload{Body: []byte("100")})
+			assert.NoError(t, err)
+			close(done)
+		} else {
+			panic("Pool is nil")
+		}
 	}()
+
 
 	// to ensure that worker is already busy
 	time.Sleep(time.Millisecond * 10)
 
 	_, err = p.Exec(&Payload{Body: []byte("10")})
-	assert.Error(t, err)
+	if err == nil {
+		t.Fatal("Test_StaticPool_AllocateTimeout exec should raise error")
+	}
 	assert.Contains(t, err.Error(), "worker timeout")
 
 	<-done
@@ -244,10 +263,10 @@ func Test_StaticPool_Replace_Worker(t *testing.T) {
 			DestroyTimeout:  time.Second,
 		},
 	)
+	assert.NoError(t, err)
 	defer p.Destroy()
 
 	assert.NotNil(t, p)
-	assert.NoError(t, err)
 
 	var lastPID string
 	lastPID = strconv.Itoa(*p.Workers()[0].Pid)
@@ -279,10 +298,10 @@ func Test_StaticPool_Stop_Worker(t *testing.T) {
 			DestroyTimeout:  time.Second,
 		},
 	)
+	assert.NoError(t, err)
 	defer p.Destroy()
 
 	assert.NotNil(t, p)
-	assert.NoError(t, err)
 
 	var lastPID string
 	lastPID = strconv.Itoa(*p.Workers()[0].Pid)
@@ -338,7 +357,13 @@ func Test_Static_Pool_Destroy_And_Close_While_Wait(t *testing.T) {
 	assert.NotNil(t, p)
 	assert.NoError(t, err)
 
-	go p.Exec(&Payload{Body: []byte("100")})
+	go func() {
+		_, err := p.Exec(&Payload{Body: []byte("100")})
+		if err != nil {
+			t.Errorf("error executing payload: error %v", err)
+		}
+
+	}()
 	time.Sleep(time.Millisecond * 10)
 
 	p.Destroy()
@@ -357,10 +382,10 @@ func Test_Static_Pool_Handle_Dead(t *testing.T) {
 			DestroyTimeout:  time.Second,
 		},
 	)
+	assert.NoError(t, err)
 	defer p.Destroy()
 
 	assert.NotNil(t, p)
-	assert.NoError(t, err)
 
 	for _, w := range p.workers {
 		w.state.value = StateErrored
@@ -381,10 +406,11 @@ func Test_Static_Pool_Slow_Destroy(t *testing.T) {
 			DestroyTimeout:  time.Second,
 		},
 	)
-	p.Destroy()
 
-	assert.NotNil(t, p)
 	assert.NoError(t, err)
+	assert.NotNil(t, p)
+
+	p.Destroy()
 }
 
 func Benchmark_Pool_Allocate(b *testing.B) {
@@ -425,7 +451,11 @@ func Benchmark_Pool_Echo_Batched(b *testing.B) {
 	p, _ := NewPool(
 		func() *exec.Cmd { return exec.Command("php", "tests/client.php", "echo", "pipes") },
 		NewPipeFactory(),
-		cfg,
+		Config{
+			NumWorkers:      int64(runtime.NumCPU()),
+			AllocateTimeout: time.Second * 100,
+			DestroyTimeout:  time.Second,
+		},
 	)
 	defer p.Destroy()
 

@@ -2,15 +2,15 @@ package roadrunner
 
 import (
 	"fmt"
-	"github.com/pkg/errors"
-	"github.com/spiral/goridge"
 	"os"
 	"os/exec"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/pkg/errors"
+	"github.com/spiral/goridge/v2"
 )
 
 // Worker - supervised process with api over goridge.Relay.
@@ -102,12 +102,6 @@ func (w *Worker) Wait() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	if runtime.GOOS != "windows" {
-		// windows handles processes and close pipes differently,
-		// we can ignore wait here as process.Wait() already being handled above
-		w.cmd.Wait()
-	}
-
 	if w.endState.Success() {
 		w.state.set(StateStopped)
 		return nil
@@ -137,7 +131,7 @@ func (w *Worker) Stop() error {
 		defer w.mu.Unlock()
 
 		w.state.set(StateStopping)
-		err := sendPayload(w.rl, &stopCommand{Stop: true})
+		err := sendControl(w.rl, &stopCommand{Stop: true})
 
 		<-w.waitDone
 		return err
@@ -164,32 +158,37 @@ func (w *Worker) Kill() error {
 // errors. Method might return JobError indicating issue with payload.
 func (w *Worker) Exec(rqs *Payload) (rsp *Payload, err error) {
 	w.mu.Lock()
-	defer w.mu.Unlock()
 
 	if rqs == nil {
+		w.mu.Unlock()
 		return nil, fmt.Errorf("payload can not be empty")
 	}
 
 	if w.state.Value() != StateReady {
+		w.mu.Unlock()
 		return nil, fmt.Errorf("worker is not ready (%s)", w.state.String())
 	}
 
 	w.state.set(StateWorking)
-	defer w.state.registerExec()
 
 	rsp, err = w.execPayload(rqs)
 	if err != nil {
 		if _, ok := err.(JobError); !ok {
 			w.state.set(StateErrored)
+			w.state.registerExec()
+			w.mu.Unlock()
 			return nil, err
 		}
 	}
 
-	// todo: attach when payload is complete
-	// todo: new status
-
 	w.state.set(StateReady)
+	w.state.registerExec()
+	w.mu.Unlock()
 	return rsp, err
+}
+
+func (w *Worker) markInvalid() {
+	w.state.set(StateInvalid)
 }
 
 func (w *Worker) start() error {
@@ -209,10 +208,16 @@ func (w *Worker) start() error {
 			defer w.mu.Unlock()
 
 			if w.rl != nil {
-				w.rl.Close()
+				err := w.rl.Close()
+				if err != nil {
+					w.err.lsn(EventWorkerError, WorkerError{Worker: w, Caused: err})
+				}
 			}
 
-			w.err.Close()
+			err := w.err.Close()
+			if err != nil {
+				w.err.lsn(EventWorkerError, WorkerError{Worker: w, Caused: err})
+			}
 		}
 	}()
 
@@ -220,11 +225,14 @@ func (w *Worker) start() error {
 }
 
 func (w *Worker) execPayload(rqs *Payload) (rsp *Payload, err error) {
-	if err := sendPayload(w.rl, rqs.Context); err != nil {
+	// two things
+	if err := sendControl(w.rl, rqs.Context); err != nil {
 		return nil, errors.Wrap(err, "header error")
 	}
 
-	w.rl.Send(rqs.Body, 0)
+	if err = w.rl.Send(rqs.Body, 0); err != nil {
+		return nil, errors.Wrap(err, "sender error")
+	}
 
 	var pr goridge.Prefix
 	rsp = new(Payload)
@@ -234,7 +242,7 @@ func (w *Worker) execPayload(rqs *Payload) (rsp *Payload, err error) {
 	}
 
 	if !pr.HasFlag(goridge.PayloadControl) {
-		return nil, fmt.Errorf("mailformed worker response")
+		return nil, fmt.Errorf("malformed worker response")
 	}
 
 	if pr.HasFlag(goridge.PayloadError) {
@@ -242,7 +250,7 @@ func (w *Worker) execPayload(rqs *Payload) (rsp *Payload, err error) {
 	}
 
 	// add streaming support :)
-	if rsp.Body, pr, err = w.rl.Receive(); err != nil {
+	if rsp.Body, _, err = w.rl.Receive(); err != nil {
 		return nil, errors.Wrap(err, "worker error")
 	}
 

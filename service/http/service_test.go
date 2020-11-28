@@ -1,7 +1,8 @@
 package http
 
 import (
-	"encoding/json"
+	"github.com/cenkalti/backoff/v4"
+	json "github.com/json-iterator/go"
 	"github.com/sirupsen/logrus"
 	"github.com/sirupsen/logrus/hooks/test"
 	"github.com/spiral/roadrunner"
@@ -43,7 +44,8 @@ func (cfg *testCfg) Get(name string) service.Config {
 	return nil
 }
 func (cfg *testCfg) Unmarshal(out interface{}) error {
-	return json.Unmarshal([]byte(cfg.target), out)
+	j := json.ConfigCompatibleWithStandardLibrary
+	return j.Unmarshal([]byte(cfg.target), out)
 }
 
 func Test_Service_NoConfig(t *testing.T) {
@@ -53,11 +55,12 @@ func Test_Service_NoConfig(t *testing.T) {
 	c := service.NewContainer(logger)
 	c.Register(ID, &Service{})
 
-	assert.Error(t, c.Init(&testCfg{httpCfg: `{"Enable":true}`}))
+	err := c.Init(&testCfg{httpCfg: `{"Enable":true}`})
+	assert.Error(t, err)
 
 	s, st := c.Get(ID)
 	assert.NotNil(t, s)
-	assert.Equal(t, service.StatusRegistered, st)
+	assert.Equal(t, service.StatusInactive, st)
 }
 
 func Test_Service_Configure_Disable(t *testing.T) {
@@ -71,20 +74,24 @@ func Test_Service_Configure_Disable(t *testing.T) {
 
 	s, st := c.Get(ID)
 	assert.NotNil(t, s)
-	assert.Equal(t, service.StatusRegistered, st)
+	assert.Equal(t, service.StatusInactive, st)
 }
 
 func Test_Service_Configure_Enable(t *testing.T) {
-	logger, _ := test.NewNullLogger()
-	logger.SetLevel(logrus.DebugLevel)
+	bkoff := backoff.NewExponentialBackOff()
+	bkoff.MaxElapsedTime = time.Second * 15
 
-	c := service.NewContainer(logger)
-	c.Register(ID, &Service{})
+	err := backoff.Retry(func() error {
+		logger, _ := test.NewNullLogger()
+		logger.SetLevel(logrus.DebugLevel)
 
-	assert.NoError(t, c.Init(&testCfg{httpCfg: `{
+		c := service.NewContainer(logger)
+		c.Register(ID, &Service{})
+
+		err := c.Init(&testCfg{httpCfg: `{
 			"enable": true,
 			"address": ":8070",
-			"maxRequest": 1024,
+			"maxRequestSize": 1024,
 			"uploads": {
 				"dir": ` + tmpDir() + `,
 				"forbid": []
@@ -98,24 +105,39 @@ func Test_Service_Configure_Enable(t *testing.T) {
 					"destroyTimeout": 10000000 
 				}
 			}
-	}`}))
+	}`})
+		if err != nil {
+			return err
+		}
 
-	s, st := c.Get(ID)
-	assert.NotNil(t, s)
-	assert.Equal(t, service.StatusOK, st)
+		s, st := c.Get(ID)
+		assert.NotNil(t, s)
+		assert.Equal(t, service.StatusOK, st)
+
+		return nil
+	}, bkoff)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
 }
 
 func Test_Service_Echo(t *testing.T) {
-	logger, _ := test.NewNullLogger()
-	logger.SetLevel(logrus.DebugLevel)
+	bkoff := backoff.NewExponentialBackOff()
+	bkoff.MaxElapsedTime = time.Second * 15
 
-	c := service.NewContainer(logger)
-	c.Register(ID, &Service{})
+	err := backoff.Retry(func() error {
+		logger, _ := test.NewNullLogger()
+		logger.SetLevel(logrus.DebugLevel)
 
-	assert.NoError(t, c.Init(&testCfg{httpCfg: `{
+		c := service.NewContainer(logger)
+		c.Register(ID, &Service{})
+
+		err := c.Init(&testCfg{httpCfg: `{
 			"enable": true,
-			"address": ":6029",
-			"maxRequest": 1024,
+			"address": ":6536",
+			"maxRequestSize": 1024,
 			"uploads": {
 				"dir": ` + tmpDir() + `,
 				"forbid": []
@@ -129,46 +151,77 @@ func Test_Service_Echo(t *testing.T) {
 					"destroyTimeout": 10000000 
 				}
 			}
-	}`}))
+	}`})
+		if err != nil {
+			return err
+		}
 
-	s, st := c.Get(ID)
-	assert.NotNil(t, s)
-	assert.Equal(t, service.StatusOK, st)
+		s, st := c.Get(ID)
+		assert.NotNil(t, s)
+		assert.Equal(t, service.StatusOK, st)
 
-	// should do nothing
-	s.(*Service).Stop()
+		// should do nothing
+		s.(*Service).Stop()
 
-	go func() { c.Serve() }()
-	time.Sleep(time.Millisecond * 100)
-	defer c.Stop()
+		go func() {
+			err := c.Serve()
+			if err != nil {
+				t.Errorf("serve error: %v", err)
+			}
+		}()
 
-	req, err := http.NewRequest("GET", "http://localhost:6029?hello=world", nil)
-	assert.NoError(t, err)
+		time.Sleep(time.Millisecond * 100)
 
-	r, err := http.DefaultClient.Do(req)
-	assert.NoError(t, err)
-	defer r.Body.Close()
+		req, err := http.NewRequest("GET", "http://localhost:6536?hello=world", nil)
+		if err != nil {
+			c.Stop()
+			return err
+		}
 
-	b, err := ioutil.ReadAll(r.Body)
-	assert.NoError(t, err)
+		r, err := http.DefaultClient.Do(req)
+		if err != nil {
+			c.Stop()
+			return err
+		}
+		b, err := ioutil.ReadAll(r.Body)
+		if err != nil {
+			c.Stop()
+			return err
+		}
+		assert.Equal(t, 201, r.StatusCode)
+		assert.Equal(t, "WORLD", string(b))
 
-	assert.NoError(t, err)
-	assert.Equal(t, 201, r.StatusCode)
-	assert.Equal(t, "WORLD", string(b))
+		err = r.Body.Close()
+		if err != nil {
+			c.Stop()
+			return err
+		}
+
+		c.Stop()
+		return nil
+	}, bkoff)
+
+	if err != nil {
+		t.Fatal(err)
+	}
 }
 
 func Test_Service_Env(t *testing.T) {
-	logger, _ := test.NewNullLogger()
-	logger.SetLevel(logrus.DebugLevel)
+	bkoff := backoff.NewExponentialBackOff()
+	bkoff.MaxElapsedTime = time.Second * 15
 
-	c := service.NewContainer(logger)
-	c.Register(env.ID, env.NewService(map[string]string{"rr": "test"}))
-	c.Register(ID, &Service{})
+	err := backoff.Retry(func() error {
+		logger, _ := test.NewNullLogger()
+		logger.SetLevel(logrus.DebugLevel)
 
-	assert.NoError(t, c.Init(&testCfg{httpCfg: `{
+		c := service.NewContainer(logger)
+		c.Register(env.ID, env.NewService(map[string]string{"rr": "test"}))
+		c.Register(ID, &Service{})
+
+		err := c.Init(&testCfg{httpCfg: `{
 			"enable": true,
-			"address": ":6029",
-			"maxRequest": 1024,
+			"address": ":10031",
+			"maxRequestSize": 1024,
 			"uploads": {
 				"dir": ` + tmpDir() + `,
 				"forbid": []
@@ -182,45 +235,79 @@ func Test_Service_Env(t *testing.T) {
 					"destroyTimeout": 10000000 
 				}
 			}
-	}`, envCfg: `{"env_key":"ENV_VALUE"}`}))
+	}`, envCfg: `{"env_key":"ENV_VALUE"}`})
+		if err != nil {
+			return err
+		}
 
-	s, st := c.Get(ID)
-	assert.NotNil(t, s)
-	assert.Equal(t, service.StatusOK, st)
+		s, st := c.Get(ID)
+		assert.NotNil(t, s)
+		assert.Equal(t, service.StatusOK, st)
 
-	// should do nothing
-	s.(*Service).Stop()
+		// should do nothing
+		s.(*Service).Stop()
 
-	go func() { c.Serve() }()
-	time.Sleep(time.Millisecond * 100)
-	defer c.Stop()
+		go func() {
+			err := c.Serve()
+			if err != nil {
+				t.Errorf("serve error: %v", err)
+			}
+		}()
 
-	req, err := http.NewRequest("GET", "http://localhost:6029", nil)
-	assert.NoError(t, err)
+		time.Sleep(time.Millisecond * 500)
 
-	r, err := http.DefaultClient.Do(req)
-	assert.NoError(t, err)
-	defer r.Body.Close()
+		req, err := http.NewRequest("GET", "http://localhost:10031", nil)
+		if err != nil {
+			c.Stop()
+			return err
+		}
 
-	b, err := ioutil.ReadAll(r.Body)
-	assert.NoError(t, err)
+		r, err := http.DefaultClient.Do(req)
+		if err != nil {
+			c.Stop()
+			return err
+		}
 
-	assert.NoError(t, err)
-	assert.Equal(t, 200, r.StatusCode)
-	assert.Equal(t, "ENV_VALUE", string(b))
+		b, err := ioutil.ReadAll(r.Body)
+		if err != nil {
+			c.Stop()
+			return err
+		}
+
+		assert.Equal(t, 200, r.StatusCode)
+		assert.Equal(t, "ENV_VALUE", string(b))
+
+		err = r.Body.Close()
+		if err != nil {
+			c.Stop()
+			return err
+		}
+
+		c.Stop()
+		return nil
+	}, bkoff)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
 }
 
 func Test_Service_ErrorEcho(t *testing.T) {
-	logger, _ := test.NewNullLogger()
-	logger.SetLevel(logrus.DebugLevel)
+	bkoff := backoff.NewExponentialBackOff()
+	bkoff.MaxElapsedTime = time.Second * 15
 
-	c := service.NewContainer(logger)
-	c.Register(ID, &Service{})
+	err := backoff.Retry(func() error {
+		logger, _ := test.NewNullLogger()
+		logger.SetLevel(logrus.DebugLevel)
 
-	assert.NoError(t, c.Init(&testCfg{httpCfg: `{
+		c := service.NewContainer(logger)
+		c.Register(ID, &Service{})
+
+		err := c.Init(&testCfg{httpCfg: `{
 			"enable": true,
-			"address": ":6029",
-			"maxRequest": 1024,
+			"address": ":6030",
+			"maxRequestSize": 1024,
 			"uploads": {
 				"dir": ` + tmpDir() + `,
 				"forbid": []
@@ -234,53 +321,86 @@ func Test_Service_ErrorEcho(t *testing.T) {
 					"destroyTimeout": 10000000 
 				}
 			}
-	}`}))
-
-	s, st := c.Get(ID)
-	assert.NotNil(t, s)
-	assert.Equal(t, service.StatusOK, st)
-
-	goterr := make(chan interface{})
-	s.(*Service).AddListener(func(event int, ctx interface{}) {
-		if event == roadrunner.EventStderrOutput {
-			if string(ctx.([]byte)) == "WORLD\n" {
-				goterr <- nil
-			}
+	}`})
+		if err != nil {
+			return err
 		}
-	})
 
-	go func() { c.Serve() }()
-	time.Sleep(time.Millisecond * 100)
-	defer c.Stop()
+		s, st := c.Get(ID)
+		assert.NotNil(t, s)
+		assert.Equal(t, service.StatusOK, st)
 
-	req, err := http.NewRequest("GET", "http://localhost:6029?hello=world", nil)
-	assert.NoError(t, err)
+		goterr := make(chan interface{})
+		s.(*Service).AddListener(func(event int, ctx interface{}) {
+			if event == roadrunner.EventStderrOutput {
+				if string(ctx.([]byte)) == "WORLD\n" {
+					goterr <- nil
+				}
+			}
+		})
 
-	r, err := http.DefaultClient.Do(req)
-	assert.NoError(t, err)
-	defer r.Body.Close()
+		go func() {
+			err := c.Serve()
+			if err != nil {
+				t.Errorf("serve error: %v", err)
+			}
+		}()
 
-	b, err := ioutil.ReadAll(r.Body)
-	assert.NoError(t, err)
+		time.Sleep(time.Millisecond * 500)
 
-	<-goterr
+		req, err := http.NewRequest("GET", "http://localhost:6030?hello=world", nil)
+		if err != nil {
+			c.Stop()
+			return err
+		}
 
-	assert.NoError(t, err)
-	assert.Equal(t, 201, r.StatusCode)
-	assert.Equal(t, "WORLD", string(b))
+		r, err := http.DefaultClient.Do(req)
+		if err != nil {
+			c.Stop()
+			return err
+		}
+
+		b, err := ioutil.ReadAll(r.Body)
+		if err != nil {
+			c.Stop()
+			return err
+		}
+
+		<-goterr
+
+		assert.Equal(t, 201, r.StatusCode)
+		assert.Equal(t, "WORLD", string(b))
+		err = r.Body.Close()
+		if err != nil {
+			c.Stop()
+			return err
+		}
+
+		c.Stop()
+
+		return nil
+	}, bkoff)
+
+	if err != nil {
+		t.Fatal(err)
+	}
 }
 
 func Test_Service_Middleware(t *testing.T) {
-	logger, _ := test.NewNullLogger()
-	logger.SetLevel(logrus.DebugLevel)
+	bkoff := backoff.NewExponentialBackOff()
+	bkoff.MaxElapsedTime = time.Second * 15
 
-	c := service.NewContainer(logger)
-	c.Register(ID, &Service{})
+	err := backoff.Retry(func() error {
+		logger, _ := test.NewNullLogger()
+		logger.SetLevel(logrus.DebugLevel)
 
-	assert.NoError(t, c.Init(&testCfg{httpCfg: `{
+		c := service.NewContainer(logger)
+		c.Register(ID, &Service{})
+
+		err := c.Init(&testCfg{httpCfg: `{
 			"enable": true,
-			"address": ":6029",
-			"maxRequest": 1024,
+			"address": ":6032",
+			"maxRequestSize": 1024,
 			"uploads": {
 				"dir": ` + tmpDir() + `,
 				"forbid": []
@@ -294,67 +414,115 @@ func Test_Service_Middleware(t *testing.T) {
 					"destroyTimeout": 10000000 
 				}
 			}
-	}`}))
-
-	s, st := c.Get(ID)
-	assert.NotNil(t, s)
-	assert.Equal(t, service.StatusOK, st)
-
-	s.(*Service).AddMiddleware(func(f http.HandlerFunc) http.HandlerFunc {
-		return func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path == "/halt" {
-				w.WriteHeader(500)
-				w.Write([]byte("halted"))
-			} else {
-				f(w, r)
-			}
+	}`})
+		if err != nil {
+			return err
 		}
-	})
 
-	go func() { c.Serve() }()
-	time.Sleep(time.Millisecond * 100)
-	defer c.Stop()
+		s, st := c.Get(ID)
+		assert.NotNil(t, s)
+		assert.Equal(t, service.StatusOK, st)
 
-	req, err := http.NewRequest("GET", "http://localhost:6029?hello=world", nil)
-	assert.NoError(t, err)
+		s.(*Service).AddMiddleware(func(f http.HandlerFunc) http.HandlerFunc {
+			return func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/halt" {
+					w.WriteHeader(500)
+					_, err := w.Write([]byte("halted"))
+					if err != nil {
+						t.Errorf("error writing the data to the http reply: error %v", err)
+					}
+				} else {
+					f(w, r)
+				}
+			}
+		})
 
-	r, err := http.DefaultClient.Do(req)
-	assert.NoError(t, err)
-	defer r.Body.Close()
+		go func() {
+			err := c.Serve()
+			if err != nil {
+				t.Errorf("serve error: %v", err)
+			}
+		}()
+		time.Sleep(time.Millisecond * 500)
 
-	b, err := ioutil.ReadAll(r.Body)
-	assert.NoError(t, err)
+		req, err := http.NewRequest("GET", "http://localhost:6032?hello=world", nil)
+		if err != nil {
+			c.Stop()
+			return err
+		}
 
-	assert.NoError(t, err)
-	assert.Equal(t, 201, r.StatusCode)
-	assert.Equal(t, "WORLD", string(b))
+		r, err := http.DefaultClient.Do(req)
+		if err != nil {
+			c.Stop()
+			return err
+		}
 
-	req, err = http.NewRequest("GET", "http://localhost:6029/halt", nil)
-	assert.NoError(t, err)
+		b, err := ioutil.ReadAll(r.Body)
+		if err != nil {
+			c.Stop()
+			return err
+		}
 
-	r, err = http.DefaultClient.Do(req)
-	assert.NoError(t, err)
-	defer r.Body.Close()
+		assert.Equal(t, 201, r.StatusCode)
+		assert.Equal(t, "WORLD", string(b))
 
-	b, err = ioutil.ReadAll(r.Body)
-	assert.NoError(t, err)
+		err = r.Body.Close()
+		if err != nil {
+			c.Stop()
+			return err
+		}
 
-	assert.NoError(t, err)
-	assert.Equal(t, 500, r.StatusCode)
-	assert.Equal(t, "halted", string(b))
+		req, err = http.NewRequest("GET", "http://localhost:6032/halt", nil)
+		if err != nil {
+			c.Stop()
+			return err
+		}
+
+		r, err = http.DefaultClient.Do(req)
+		if err != nil {
+			c.Stop()
+			return err
+		}
+		b, err = ioutil.ReadAll(r.Body)
+		if err != nil {
+			c.Stop()
+			return err
+		}
+
+		assert.Equal(t, 500, r.StatusCode)
+		assert.Equal(t, "halted", string(b))
+
+		err = r.Body.Close()
+		if err != nil {
+			c.Stop()
+			return err
+		}
+		c.Stop()
+
+		return nil
+	}, bkoff)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
 }
 
 func Test_Service_Listener(t *testing.T) {
-	logger, _ := test.NewNullLogger()
-	logger.SetLevel(logrus.DebugLevel)
+	bkoff := backoff.NewExponentialBackOff()
+	bkoff.MaxElapsedTime = time.Second * 15
 
-	c := service.NewContainer(logger)
-	c.Register(ID, &Service{})
+	err := backoff.Retry(func() error {
+		logger, _ := test.NewNullLogger()
+		logger.SetLevel(logrus.DebugLevel)
 
-	assert.NoError(t, c.Init(&testCfg{httpCfg: `{
+		c := service.NewContainer(logger)
+		c.Register(ID, &Service{})
+
+		err := c.Init(&testCfg{httpCfg: `{
 			"enable": true,
-			"address": ":6029",
-			"maxRequest": 1024,
+			"address": ":6033",
+			"maxRequestSize": 1024,
 			"uploads": {
 				"dir": ` + tmpDir() + `,
 				"forbid": []
@@ -368,37 +536,56 @@ func Test_Service_Listener(t *testing.T) {
 					"destroyTimeout": 10000000 
 				}
 			}
-	}`}))
-
-	s, st := c.Get(ID)
-	assert.NotNil(t, s)
-	assert.Equal(t, service.StatusOK, st)
-
-	stop := make(chan interface{})
-	s.(*Service).AddListener(func(event int, ctx interface{}) {
-		if event == roadrunner.EventServerStart {
-			stop <- nil
+	}`})
+		if err != nil {
+			return err
 		}
-	})
 
-	go func() { c.Serve() }()
-	time.Sleep(time.Millisecond * 100)
+		s, st := c.Get(ID)
+		assert.NotNil(t, s)
+		assert.Equal(t, service.StatusOK, st)
 
-	c.Stop()
-	assert.True(t, true)
+		stop := make(chan interface{})
+		s.(*Service).AddListener(func(event int, ctx interface{}) {
+			if event == roadrunner.EventServerStart {
+				stop <- nil
+			}
+		})
+
+		go func() {
+			err := c.Serve()
+			if err != nil {
+				t.Errorf("serve error: %v", err)
+			}
+		}()
+		time.Sleep(time.Millisecond * 500)
+
+		c.Stop()
+		assert.True(t, true)
+
+		return nil
+	}, bkoff)
+
+	if err != nil {
+		t.Fatal(err)
+	}
 }
 
 func Test_Service_Error(t *testing.T) {
-	logger, _ := test.NewNullLogger()
-	logger.SetLevel(logrus.DebugLevel)
+	bkoff := backoff.NewExponentialBackOff()
+	bkoff.MaxElapsedTime = time.Second * 15
 
-	c := service.NewContainer(logger)
-	c.Register(ID, &Service{})
+	err := backoff.Retry(func() error {
+		logger, _ := test.NewNullLogger()
+		logger.SetLevel(logrus.DebugLevel)
 
-	assert.NoError(t, c.Init(&testCfg{httpCfg: `{
+		c := service.NewContainer(logger)
+		c.Register(ID, &Service{})
+
+		err := c.Init(&testCfg{httpCfg: `{
 			"enable": true,
-			"address": ":6029",
-			"maxRequest": 1024,
+			"address": ":6034",
+			"maxRequestSize": 1024,
 			"uploads": {
 				"dir": ` + tmpDir() + `,
 				"forbid": []
@@ -412,22 +599,40 @@ func Test_Service_Error(t *testing.T) {
 					"destroyTimeout": 10000000 
 				}
 			}
-	}`}))
+	}`})
+		if err != nil {
+			return err
+		}
 
-	assert.Error(t, c.Serve())
+		// assert error
+		err = c.Serve()
+		if err == nil {
+			return err
+		}
+
+		return nil
+	}, bkoff)
+
+	if err != nil {
+		t.Fatal(err)
+	}
 }
 
 func Test_Service_Error2(t *testing.T) {
-	logger, _ := test.NewNullLogger()
-	logger.SetLevel(logrus.DebugLevel)
+	bkoff := backoff.NewExponentialBackOff()
+	bkoff.MaxElapsedTime = time.Second * 15
 
-	c := service.NewContainer(logger)
-	c.Register(ID, &Service{})
+	err := backoff.Retry(func() error {
+		logger, _ := test.NewNullLogger()
+		logger.SetLevel(logrus.DebugLevel)
 
-	assert.NoError(t, c.Init(&testCfg{httpCfg: `{
+		c := service.NewContainer(logger)
+		c.Register(ID, &Service{})
+
+		err := c.Init(&testCfg{httpCfg: `{
 			"enable": true,
-			"address": ":6029",
-			"maxRequest": 1024,
+			"address": ":6035",
+			"maxRequestSize": 1024,
 			"uploads": {
 				"dir": ` + tmpDir() + `,
 				"forbid": []
@@ -441,22 +646,40 @@ func Test_Service_Error2(t *testing.T) {
 					"destroyTimeout": 10000000 
 				}
 			}
-	}`}))
+	}`})
+		if err != nil {
+			return err
+		}
 
-	assert.Error(t, c.Serve())
+		// assert error
+		err = c.Serve()
+		if err == nil {
+			return err
+		}
+
+		return nil
+	}, bkoff)
+
+	if err != nil {
+		t.Fatal(err)
+	}
 }
 
 func Test_Service_Error3(t *testing.T) {
-	logger, _ := test.NewNullLogger()
-	logger.SetLevel(logrus.DebugLevel)
+	bkoff := backoff.NewExponentialBackOff()
+	bkoff.MaxElapsedTime = time.Second * 15
 
-	c := service.NewContainer(logger)
-	c.Register(ID, &Service{})
+	err := backoff.Retry(func() error {
+		logger, _ := test.NewNullLogger()
+		logger.SetLevel(logrus.DebugLevel)
 
-	assert.Error(t, c.Init(&testCfg{httpCfg: `{
+		c := service.NewContainer(logger)
+		c.Register(ID, &Service{})
+
+		err := c.Init(&testCfg{httpCfg: `{
 			"enable": true,
-			"address": ":6029",
-			"maxRequest": 1024,
+			"address": ":6036",
+			"maxRequestSize": 1024,
 			"uploads": {
 				"dir": ` + tmpDir() + `,
 				"forbid": []
@@ -470,20 +693,36 @@ func Test_Service_Error3(t *testing.T) {
 					"destroyTimeout": 10000000 
 				}
 			}
-	}`}))
+	}`})
+		// assert error
+		if err == nil {
+			return err
+		}
+
+		return nil
+	}, bkoff)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
 }
 
 func Test_Service_Error4(t *testing.T) {
-	logger, _ := test.NewNullLogger()
-	logger.SetLevel(logrus.DebugLevel)
+	bkoff := backoff.NewExponentialBackOff()
+	bkoff.MaxElapsedTime = time.Second * 15
 
-	c := service.NewContainer(logger)
-	c.Register(ID, &Service{})
+	err := backoff.Retry(func() error {
+		logger, _ := test.NewNullLogger()
+		logger.SetLevel(logrus.DebugLevel)
 
-	assert.Error(t, c.Init(&testCfg{httpCfg: `{
+		c := service.NewContainer(logger)
+		c.Register(ID, &Service{})
+
+		err := c.Init(&testCfg{httpCfg: `{
 			"enable": true,
 			"address": "----",
-			"maxRequest": 1024,
+			"maxRequestSize": 1024,
 			"uploads": {
 				"dir": ` + tmpDir() + `,
 				"forbid": []
@@ -497,12 +736,24 @@ func Test_Service_Error4(t *testing.T) {
 					"destroyTimeout": 10000000 
 				}
 			}
-	}`}))
+	}`})
+		// assert error
+		if err != nil {
+			return nil
+		}
+
+		return err
+	}, bkoff)
+
+	if err != nil {
+		t.Fatal(err)
+	}
 }
 
 func tmpDir() string {
 	p := os.TempDir()
-	r, _ := json.Marshal(p)
+	j := json.ConfigCompatibleWithStandardLibrary
+	r, _ := j.Marshal(p)
 
 	return string(r)
 }

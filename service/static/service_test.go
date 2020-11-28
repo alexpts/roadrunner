@@ -2,7 +2,7 @@ package static
 
 import (
 	"bytes"
-	"encoding/json"
+	json "github.com/json-iterator/go"
 	"github.com/sirupsen/logrus"
 	"github.com/sirupsen/logrus/hooks/test"
 	"github.com/spiral/roadrunner/service"
@@ -33,18 +33,8 @@ func (cfg *testCfg) Get(name string) service.Config {
 	return nil
 }
 func (cfg *testCfg) Unmarshal(out interface{}) error {
-	return json.Unmarshal([]byte(cfg.target), out)
-}
-
-func get(url string) (string, *http.Response, error) {
-	r, err := http.Get(url)
-	if err != nil {
-		return "", nil, err
-	}
-	defer r.Body.Close()
-
-	b, err := ioutil.ReadAll(r.Body)
-	return string(b), r, err
+	j := json.ConfigCompatibleWithStandardLibrary
+	return j.Unmarshal([]byte(cfg.target), out)
 }
 
 func Test_Files(t *testing.T) {
@@ -59,8 +49,8 @@ func Test_Files(t *testing.T) {
 		static: `{"enable":true, "dir":"../../tests", "forbid":[]}`,
 		httpCfg: `{
 			"enable": true,
-			"address": ":6029",
-			"maxRequest": 1024,
+			"address": ":8029",
+			"maxRequestSize": 1024,
 			"uploads": {
 				"dir": ` + tmpDir() + `,
 				"forbid": []
@@ -69,19 +59,26 @@ func Test_Files(t *testing.T) {
 				"command": "php ../../tests/http/client.php pid pipes",
 				"relay": "pipes",
 				"pool": {
-					"numWorkers": 1, 
+					"numWorkers": 1,
 					"allocateTimeout": 10000000,
-					"destroyTimeout": 10000000 
+					"destroyTimeout": 10000000
 				}
 			}
 	}`}))
 
-	go func() { c.Serve() }()
-	time.Sleep(time.Millisecond * 100)
-	defer c.Stop()
+	go func() {
+		err := c.Serve()
+		if err != nil {
+			t.Errorf("serve error: %v", err)
+		}
+	}()
 
-	b, _, _ := get("http://localhost:6029/sample.txt")
+	time.Sleep(time.Second)
+
+
+	b, _, _ := get("http://localhost:8029/sample.txt")
 	assert.Equal(t, "sample", b)
+	c.Stop()
 }
 
 func Test_Disabled(t *testing.T) {
@@ -97,7 +94,7 @@ func Test_Disabled(t *testing.T) {
 
 	s, st := c.Get(ID)
 	assert.NotNil(t, s)
-	assert.Equal(t, service.StatusRegistered, st)
+	assert.Equal(t, service.StatusInactive, st)
 }
 
 func Test_Files_Disable(t *testing.T) {
@@ -112,8 +109,8 @@ func Test_Files_Disable(t *testing.T) {
 		static: `{"enable":false, "dir":"../../tests", "forbid":[".php"]}`,
 		httpCfg: `{
 			"enable": true,
-			"address": ":6029",
-			"maxRequest": 1024,
+			"address": ":8030",
+			"maxRequestSize": 1024,
 			"uploads": {
 				"dir": ` + tmpDir() + `,
 				"forbid": []
@@ -129,12 +126,21 @@ func Test_Files_Disable(t *testing.T) {
 			}
 	}`}))
 
-	go func() { c.Serve() }()
-	time.Sleep(time.Millisecond * 100)
-	defer c.Stop()
+	go func() {
+		err := c.Serve()
+		if err != nil {
+			t.Errorf("serve error: %v", err)
+		}
+	}()
 
-	b, _, _ := get("http://localhost:6029/client.php?hello=world")
+	time.Sleep(time.Second)
+
+	b, _, err := get("http://localhost:8030/client.php?hello=world")
+	if err != nil {
+		t.Fatal(err)
+	}
 	assert.Equal(t, "WORLD", b)
+	c.Stop()
 }
 
 func Test_Files_Error(t *testing.T) {
@@ -149,8 +155,8 @@ func Test_Files_Error(t *testing.T) {
 		static: `{"enable":true, "dir":"dir/invalid", "forbid":[".php"]}`,
 		httpCfg: `{
 			"enable": true,
-			"address": ":6029",
-			"maxRequest": 1024,
+			"address": ":8031",
+			"maxRequestSize": 1024,
 			"uploads": {
 				"dir": ` + tmpDir() + `,
 				"forbid": []
@@ -179,8 +185,8 @@ func Test_Files_Error2(t *testing.T) {
 		static: `{"enable":true, "dir":"dir/invalid", "forbid":[".php"]`,
 		httpCfg: `{
 			"enable": true,
-			"address": ":6029",
-			"maxRequest": 1024,
+			"address": ":8032",
+			"maxRequestSize": 1024,
 			"uploads": {
 				"dir": ` + tmpDir() + `,
 				"forbid": []
@@ -209,8 +215,8 @@ func Test_Files_Forbid(t *testing.T) {
 		static: `{"enable":true, "dir":"../../tests", "forbid":[".php"]}`,
 		httpCfg: `{
 			"enable": true,
-			"address": ":6029",
-			"maxRequest": 1024,
+			"address": ":8033",
+			"maxRequestSize": 1024,
 			"uploads": {
 				"dir": ` + tmpDir() + `,
 				"forbid": []
@@ -226,12 +232,66 @@ func Test_Files_Forbid(t *testing.T) {
 			}
 	}`}))
 
-	go func() { c.Serve() }()
-	time.Sleep(time.Millisecond * 100)
-	defer c.Stop()
+	go func() {
+		err := c.Serve()
+		if err != nil {
+			t.Errorf("serve error: %v", err)
+		}
+	}()
+	time.Sleep(time.Millisecond * 500)
 
-	b, _, _ := get("http://localhost:6029/client.php?hello=world")
+	b, _, err := get("http://localhost:8033/client.php?hello=world")
+	if err != nil {
+		t.Fatal(err)
+	}
 	assert.Equal(t, "WORLD", b)
+	c.Stop()
+}
+
+func Test_Files_Always(t *testing.T) {
+	logger, _ := test.NewNullLogger()
+	logger.SetLevel(logrus.DebugLevel)
+
+	c := service.NewContainer(logger)
+	c.Register(rrhttp.ID, &rrhttp.Service{})
+	c.Register(ID, &Service{})
+
+	assert.NoError(t, c.Init(&testCfg{
+		static: `{"enable":true, "dir":"../../tests", "forbid":[".php"], "always":[".ico"]}`,
+		httpCfg: `{
+			"enable": true,
+			"address": ":8034",
+			"maxRequestSize": 1024,
+			"uploads": {
+				"dir": ` + tmpDir() + `,
+				"forbid": []
+			},
+			"workers":{
+				"command": "php ../../tests/http/client.php echo pipes",
+				"relay": "pipes",
+				"pool": {
+					"numWorkers": 1,
+					"allocateTimeout": 10000000,
+					"destroyTimeout": 10000000
+				}
+			}
+	}`}))
+
+	go func() {
+		err := c.Serve()
+		if err != nil {
+			t.Errorf("serve error: %v", err)
+		}
+	}()
+
+	time.Sleep(time.Millisecond * 500)
+
+	_, r, err := get("http://localhost:8034/favicon.ico")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assert.Equal(t, 404, r.StatusCode)
+	c.Stop()
 }
 
 func Test_Files_NotFound(t *testing.T) {
@@ -246,8 +306,8 @@ func Test_Files_NotFound(t *testing.T) {
 		static: `{"enable":true, "dir":"../../tests", "forbid":[".php"]}`,
 		httpCfg: `{
 			"enable": true,
-			"address": ":6029",
-			"maxRequest": 1024,
+			"address": ":8035",
+			"maxRequestSize": 1024,
 			"uploads": {
 				"dir": ` + tmpDir() + `,
 				"forbid": []
@@ -263,12 +323,18 @@ func Test_Files_NotFound(t *testing.T) {
 			}
 	}`}))
 
-	go func() { c.Serve() }()
-	time.Sleep(time.Millisecond * 100)
-	defer c.Stop()
+	go func() {
+		err := c.Serve()
+		if err != nil {
+			t.Errorf("serve error: %v", err)
+		}
+	}()
 
-	b, _, _ := get("http://localhost:6029/client.XXX?hello=world")
+	time.Sleep(time.Millisecond * 500)
+
+	b, _, _ := get("http://localhost:8035/client.XXX?hello=world")
 	assert.Equal(t, "WORLD", b)
+	c.Stop()
 }
 
 func Test_Files_Dir(t *testing.T) {
@@ -283,8 +349,8 @@ func Test_Files_Dir(t *testing.T) {
 		static: `{"enable":true, "dir":"../../tests", "forbid":[".php"]}`,
 		httpCfg: `{
 			"enable": true,
-			"address": ":6029",
-			"maxRequest": 1024,
+			"address": ":8036",
+			"maxRequestSize": 1024,
 			"uploads": {
 				"dir": ` + tmpDir() + `,
 				"forbid": []
@@ -300,12 +366,17 @@ func Test_Files_Dir(t *testing.T) {
 			}
 	}`}))
 
-	go func() { c.Serve() }()
-	time.Sleep(time.Millisecond * 100)
-	defer c.Stop()
+	go func() {
+		err := c.Serve()
+		if err != nil {
+			t.Errorf("serve error: %v", err)
+		}
+	}()
+	time.Sleep(time.Millisecond * 500)
 
-	b, _, _ := get("http://localhost:6029/http?hello=world")
+	b, _, _ := get("http://localhost:8036/http?hello=world")
 	assert.Equal(t, "WORLD", b)
+	c.Stop()
 }
 
 func Test_Files_NotForbid(t *testing.T) {
@@ -320,8 +391,8 @@ func Test_Files_NotForbid(t *testing.T) {
 		static: `{"enable":true, "dir":"../../tests", "forbid":[]}`,
 		httpCfg: `{
 			"enable": true,
-			"address": ":6029",
-			"maxRequest": 1024,
+			"address": ":8037",
+			"maxRequestSize": 1024,
 			"uploads": {
 				"dir": ` + tmpDir() + `,
 				"forbid": []
@@ -337,27 +408,124 @@ func Test_Files_NotForbid(t *testing.T) {
 			}
 	}`}))
 
-	go func() { c.Serve() }()
-	time.Sleep(time.Millisecond * 100)
-	defer c.Stop()
+	go func() {
+		err := c.Serve()
+		if err != nil {
+			t.Errorf("serve error: %v", err)
+		}
+	}()
 
-	b, _, _ := get("http://localhost:6029/client.php")
+	time.Sleep(time.Millisecond * 500)
+
+	b, _, _ := get("http://localhost:8037/client.php")
 	assert.Equal(t, all("../../tests/client.php"), b)
+	assert.Equal(t, all("../../tests/client.php"), b)
+	c.Stop()
+}
+
+func TestStatic_Headers(t *testing.T) {
+	logger, _ := test.NewNullLogger()
+	logger.SetLevel(logrus.DebugLevel)
+
+	c := service.NewContainer(logger)
+	c.Register(rrhttp.ID, &rrhttp.Service{})
+	c.Register(ID, &Service{})
+
+	assert.NoError(t, c.Init(&testCfg{
+		static: `{"enable":true, "dir":"../../tests", "forbid":[], "request":{"input": "custom-header"}, "response":{"output": "output-header"}}`,
+		httpCfg: `{
+			"enable": true,
+			"address": ":8037",
+			"maxRequestSize": 1024,
+			"uploads": {
+				"dir": ` + tmpDir() + `,
+				"forbid": []
+			},
+			"workers":{
+				"command": "php ../../tests/http/client.php pid pipes",
+				"relay": "pipes",
+				"pool": {
+					"numWorkers": 1,
+					"allocateTimeout": 10000000,
+					"destroyTimeout": 10000000
+				}
+			}
+	}`}))
+
+	go func() {
+		err := c.Serve()
+		if err != nil {
+			t.Errorf("serve error: %v", err)
+		}
+	}()
+
+	time.Sleep(time.Millisecond * 500)
+
+	req, err := http.NewRequest("GET", "http://localhost:8037/client.php", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if resp.Header.Get("Output") != "output-header" {
+		t.Fatal("can't find output header in response")
+	}
+
+
+	b, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assert.Equal(t, all("../../tests/client.php"), string(b))
+	assert.Equal(t, all("../../tests/client.php"), string(b))
+	c.Stop()
+}
+
+func get(url string) (string, *http.Response, error) {
+	r, err := http.Get(url)
+	if err != nil {
+		return "", nil, err
+	}
+
+	b, err := ioutil.ReadAll(r.Body)
+	if err != nil {
+		return "", nil, err
+	}
+
+	err = r.Body.Close()
+	if err != nil {
+		return "", nil, err
+	}
+
+	return string(b), r, err
 }
 
 func tmpDir() string {
 	p := os.TempDir()
-	r, _ := json.Marshal(p)
+	j := json.ConfigCompatibleWithStandardLibrary
+	r, _ := j.Marshal(p)
 
 	return string(r)
 }
 
 func all(fn string) string {
 	f, _ := os.Open(fn)
-	defer f.Close()
 
 	b := &bytes.Buffer{}
-	io.Copy(b, f)
+	_, err := io.Copy(b, f)
+	if err != nil {
+		return ""
+	}
+
+	err = f.Close()
+	if err != nil {
+		return ""
+	}
 
 	return b.String()
 }

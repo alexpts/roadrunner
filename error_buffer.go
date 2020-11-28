@@ -73,9 +73,8 @@ func newErrBuffer() *errBuffer {
 // Listen attaches error stream even listener.
 func (eb *errBuffer) Listen(l func(event int, ctx interface{})) {
 	eb.mu.Lock()
-	defer eb.mu.Unlock()
-
 	eb.lsn = l
+	eb.mu.Unlock()
 }
 
 // Len returns the number of buf of the unread portion of the errBuffer;
@@ -88,13 +87,12 @@ func (eb *errBuffer) Len() int {
 	return len(eb.buf)
 }
 
-// Write appends the contents of p to the errBuffer, growing the errBuffer as
-// needed. The return value n is the length of p; err is always nil.
+// Write appends the contents of pool to the errBuffer, growing the errBuffer as
+// needed. The return value n is the length of pool; err is always nil.
 func (eb *errBuffer) Write(p []byte) (int, error) {
 	eb.mu.Lock()
-	defer eb.mu.Unlock()
-
 	eb.buf = append(eb.buf, p...)
+	eb.mu.Unlock()
 	eb.update <- nil
 
 	return len(p), nil

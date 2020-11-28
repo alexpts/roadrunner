@@ -5,7 +5,8 @@ import (
 	"context"
 	"crypto/md5"
 	"encoding/hex"
-	"encoding/json"
+	"fmt"
+	json "github.com/json-iterator/go"
 	"github.com/spiral/roadrunner"
 	"github.com/stretchr/testify/assert"
 	"io"
@@ -17,10 +18,10 @@ import (
 	"time"
 )
 
-func TestServer_Upload_File(t *testing.T) {
-	st := &Handler{
+func TestHandler_Upload_File(t *testing.T) {
+	h := &Handler{
 		cfg: &Config{
-			MaxRequest: 1024,
+			MaxRequestSize: 1024,
 			Uploads: &UploadsConfig{
 				Dir:    os.TempDir(),
 				Forbid: []string{},
@@ -37,26 +38,47 @@ func TestServer_Upload_File(t *testing.T) {
 		}),
 	}
 
-	assert.NoError(t, st.rr.Start())
-	defer st.rr.Stop()
+	assert.NoError(t, h.rr.Start())
+	defer h.rr.Stop()
 
-	hs := &http.Server{Addr: ":8021", Handler: st}
-	defer hs.Shutdown(context.Background())
+	hs := &http.Server{Addr: ":8021", Handler: h}
+	defer func() {
+		err := hs.Shutdown(context.Background())
+		if err != nil {
+			t.Errorf("error during the shutdown: error %v", err)
+		}
+	}()
 
-	go func() { hs.ListenAndServe() }()
+	go func() {
+		err := hs.ListenAndServe()
+		if err != nil && err != http.ErrServerClosed {
+			t.Errorf("error listening the interface: error %v", err)
+		}
+	}()
 	time.Sleep(time.Millisecond * 10)
 
 	var mb bytes.Buffer
 	w := multipart.NewWriter(&mb)
 
 	f := mustOpen("uploads_test.go")
-	defer f.Close()
+	defer func() {
+		err := f.Close()
+		if err != nil {
+			t.Errorf("failed to close a file: error %v", err)
+		}
+	}()
 	fw, err := w.CreateFormFile("upload", f.Name())
 	assert.NotNil(t, fw)
 	assert.NoError(t, err)
-	io.Copy(fw, f)
+	_, err = io.Copy(fw, f)
+	if err != nil {
+		t.Errorf("error copying the file: error %v", err)
+	}
 
-	w.Close()
+	err = w.Close()
+	if err != nil {
+		t.Errorf("error closing the file: error %v", err)
+	}
 
 	req, err := http.NewRequest("POST", "http://localhost"+hs.Addr, &mb)
 	assert.NoError(t, err)
@@ -65,7 +87,12 @@ func TestServer_Upload_File(t *testing.T) {
 
 	r, err := http.DefaultClient.Do(req)
 	assert.NoError(t, err)
-	defer r.Body.Close()
+	defer func() {
+		err := r.Body.Close()
+		if err != nil {
+			t.Errorf("error closing the Body: error %v", err)
+		}
+	}()
 
 	b, err := ioutil.ReadAll(r.Body)
 	assert.NoError(t, err)
@@ -78,10 +105,10 @@ func TestServer_Upload_File(t *testing.T) {
 	assert.Equal(t, `{"upload":`+fs+`}`, string(b))
 }
 
-func TestServer_Upload_NestedFile(t *testing.T) {
-	st := &Handler{
+func TestHandler_Upload_NestedFile(t *testing.T) {
+	h := &Handler{
 		cfg: &Config{
-			MaxRequest: 1024,
+			MaxRequestSize: 1024,
 			Uploads: &UploadsConfig{
 				Dir:    os.TempDir(),
 				Forbid: []string{},
@@ -98,26 +125,47 @@ func TestServer_Upload_NestedFile(t *testing.T) {
 		}),
 	}
 
-	assert.NoError(t, st.rr.Start())
-	defer st.rr.Stop()
+	assert.NoError(t, h.rr.Start())
+	defer h.rr.Stop()
 
-	hs := &http.Server{Addr: ":8021", Handler: st}
-	defer hs.Shutdown(context.Background())
+	hs := &http.Server{Addr: ":8021", Handler: h}
+	defer func() {
+		err := hs.Shutdown(context.Background())
+		if err != nil {
+			t.Errorf("error during the shutdown: error %v", err)
+		}
+	}()
 
-	go func() { hs.ListenAndServe() }()
+	go func() {
+		err := hs.ListenAndServe()
+		if err != nil && err != http.ErrServerClosed {
+			t.Errorf("error listening the interface: error %v", err)
+		}
+	}()
 	time.Sleep(time.Millisecond * 10)
 
 	var mb bytes.Buffer
 	w := multipart.NewWriter(&mb)
 
 	f := mustOpen("uploads_test.go")
-	defer f.Close()
+	defer func() {
+		err := f.Close()
+		if err != nil {
+			t.Errorf("failed to close a file: error %v", err)
+		}
+	}()
 	fw, err := w.CreateFormFile("upload[x][y][z][]", f.Name())
 	assert.NotNil(t, fw)
 	assert.NoError(t, err)
-	io.Copy(fw, f)
+	_, err = io.Copy(fw, f)
+	if err != nil {
+		t.Errorf("error copying the file: error %v", err)
+	}
 
-	w.Close()
+	err = w.Close()
+	if err != nil {
+		t.Errorf("error closing the file: error %v", err)
+	}
 
 	req, err := http.NewRequest("POST", "http://localhost"+hs.Addr, &mb)
 	assert.NoError(t, err)
@@ -126,7 +174,12 @@ func TestServer_Upload_NestedFile(t *testing.T) {
 
 	r, err := http.DefaultClient.Do(req)
 	assert.NoError(t, err)
-	defer r.Body.Close()
+	defer func() {
+		err := r.Body.Close()
+		if err != nil {
+			t.Errorf("error closing the Body: error %v", err)
+		}
+	}()
 
 	b, err := ioutil.ReadAll(r.Body)
 	assert.NoError(t, err)
@@ -139,10 +192,10 @@ func TestServer_Upload_NestedFile(t *testing.T) {
 	assert.Equal(t, `{"upload":{"x":{"y":{"z":[`+fs+`]}}}}`, string(b))
 }
 
-func TestServer_Upload_File_NoTmpDir(t *testing.T) {
-	st := &Handler{
+func TestHandler_Upload_File_NoTmpDir(t *testing.T) {
+	h := &Handler{
 		cfg: &Config{
-			MaxRequest: 1024,
+			MaxRequestSize: 1024,
 			Uploads: &UploadsConfig{
 				Dir:    "-----",
 				Forbid: []string{},
@@ -159,26 +212,47 @@ func TestServer_Upload_File_NoTmpDir(t *testing.T) {
 		}),
 	}
 
-	assert.NoError(t, st.rr.Start())
-	defer st.rr.Stop()
+	assert.NoError(t, h.rr.Start())
+	defer h.rr.Stop()
 
-	hs := &http.Server{Addr: ":8021", Handler: st}
-	defer hs.Shutdown(context.Background())
+	hs := &http.Server{Addr: ":8021", Handler: h}
+	defer func() {
+		err := hs.Shutdown(context.Background())
+		if err != nil {
+			t.Errorf("error during the shutdown: error %v", err)
+		}
+	}()
 
-	go func() { hs.ListenAndServe() }()
+	go func() {
+		err := hs.ListenAndServe()
+		if err != nil && err != http.ErrServerClosed {
+			t.Errorf("error listening the interface: error %v", err)
+		}
+	}()
 	time.Sleep(time.Millisecond * 10)
 
 	var mb bytes.Buffer
 	w := multipart.NewWriter(&mb)
 
 	f := mustOpen("uploads_test.go")
-	defer f.Close()
+	defer func() {
+		err := f.Close()
+		if err != nil {
+			t.Errorf("failed to close a file: error %v", err)
+		}
+	}()
 	fw, err := w.CreateFormFile("upload", f.Name())
 	assert.NotNil(t, fw)
 	assert.NoError(t, err)
-	io.Copy(fw, f)
+	_, err = io.Copy(fw, f)
+	if err != nil {
+		t.Errorf("error copying the file: error %v", err)
+	}
 
-	w.Close()
+	err = w.Close()
+	if err != nil {
+		t.Errorf("error closing the file: error %v", err)
+	}
 
 	req, err := http.NewRequest("POST", "http://localhost"+hs.Addr, &mb)
 	assert.NoError(t, err)
@@ -187,7 +261,12 @@ func TestServer_Upload_File_NoTmpDir(t *testing.T) {
 
 	r, err := http.DefaultClient.Do(req)
 	assert.NoError(t, err)
-	defer r.Body.Close()
+	defer func() {
+		err := r.Body.Close()
+		if err != nil {
+			t.Errorf("error closing the Body: error %v", err)
+		}
+	}()
 
 	b, err := ioutil.ReadAll(r.Body)
 	assert.NoError(t, err)
@@ -200,10 +279,10 @@ func TestServer_Upload_File_NoTmpDir(t *testing.T) {
 	assert.Equal(t, `{"upload":`+fs+`}`, string(b))
 }
 
-func TestServer_Upload_File_Forbids(t *testing.T) {
-	st := &Handler{
+func TestHandler_Upload_File_Forbids(t *testing.T) {
+	h := &Handler{
 		cfg: &Config{
-			MaxRequest: 1024,
+			MaxRequestSize: 1024,
 			Uploads: &UploadsConfig{
 				Dir:    os.TempDir(),
 				Forbid: []string{".go"},
@@ -220,26 +299,47 @@ func TestServer_Upload_File_Forbids(t *testing.T) {
 		}),
 	}
 
-	assert.NoError(t, st.rr.Start())
-	defer st.rr.Stop()
+	assert.NoError(t, h.rr.Start())
+	defer h.rr.Stop()
 
-	hs := &http.Server{Addr: ":8021", Handler: st}
-	defer hs.Shutdown(context.Background())
+	hs := &http.Server{Addr: ":8021", Handler: h}
+	defer func() {
+		err := hs.Shutdown(context.Background())
+		if err != nil {
+			t.Errorf("error during the shutdown: error %v", err)
+		}
+	}()
 
-	go func() { hs.ListenAndServe() }()
+	go func() {
+		err := hs.ListenAndServe()
+		if err != nil && err != http.ErrServerClosed {
+			t.Errorf("error listening the interface: error %v", err)
+		}
+	}()
 	time.Sleep(time.Millisecond * 10)
 
 	var mb bytes.Buffer
 	w := multipart.NewWriter(&mb)
 
 	f := mustOpen("uploads_test.go")
-	defer f.Close()
+	defer func() {
+		err := f.Close()
+		if err != nil {
+			t.Errorf("failed to close a file: error %v", err)
+		}
+	}()
 	fw, err := w.CreateFormFile("upload", f.Name())
 	assert.NotNil(t, fw)
 	assert.NoError(t, err)
-	io.Copy(fw, f)
+	_, err = io.Copy(fw, f)
+	if err != nil {
+		t.Errorf("error copying the file: error %v", err)
+	}
 
-	w.Close()
+	err = w.Close()
+	if err != nil {
+		t.Errorf("error closing the file: error %v", err)
+	}
 
 	req, err := http.NewRequest("POST", "http://localhost"+hs.Addr, &mb)
 	assert.NoError(t, err)
@@ -248,7 +348,12 @@ func TestServer_Upload_File_Forbids(t *testing.T) {
 
 	r, err := http.DefaultClient.Do(req)
 	assert.NoError(t, err)
-	defer r.Body.Close()
+	defer func() {
+		err := r.Body.Close()
+		if err != nil {
+			t.Errorf("error closing the Body: error %v", err)
+		}
+	}()
 
 	b, err := ioutil.ReadAll(r.Body)
 	assert.NoError(t, err)
@@ -282,28 +387,48 @@ type fInfo struct {
 	MD5   string `json:"md5,omitempty"`
 }
 
-func fileString(f string, err int, mime string) string {
-	s, _ := os.Stat(f)
+func fileString(f string, errNo int, mime string) string {
+	s, err := os.Stat(f)
+	if err != nil {
+		fmt.Println(fmt.Errorf("error stat the file, error: %v", err))
+	}
 
-	ff, _ := os.Open(f)
-	defer ff.Close()
+	ff, err := os.Open(f)
+	if err != nil {
+		fmt.Println(fmt.Errorf("error opening the file, error: %v", err))
+	}
+
+	defer func() {
+		er := ff.Close()
+		if er != nil {
+			fmt.Println(fmt.Errorf("error closing the file, error: %v", er))
+		}
+	}()
+
 	h := md5.New()
-	io.Copy(h, ff)
+	_, err = io.Copy(h, ff)
+	if err != nil {
+		fmt.Println(fmt.Errorf("error copying the file, error: %v", err))
+	}
 
 	v := &fInfo{
 		Name:  s.Name(),
 		Size:  s.Size(),
-		Error: err,
+		Error: errNo,
 		Mime:  mime,
 		MD5:   hex.EncodeToString(h.Sum(nil)),
 	}
 
-	if err != 0 {
+	if errNo != 0 {
 		v.MD5 = ""
 		v.Size = 0
 	}
 
-	r, _ := json.Marshal(v)
+	j := json.ConfigCompatibleWithStandardLibrary
+	r, err := j.Marshal(v)
+	if err != nil {
+		fmt.Println(fmt.Errorf("error marshalling fInfo, error: %v", err))
+	}
 	return string(r)
 
 }

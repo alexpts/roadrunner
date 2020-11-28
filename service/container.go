@@ -9,6 +9,7 @@ import (
 )
 
 var errNoConfig = fmt.Errorf("no config has been provided")
+var errTempFix223 = fmt.Errorf("temporary error for fix #223") // meant no error here, just shutdown the server
 
 // InitMethod contains name of the method to be automatically invoked while service initialization. Must return
 // (bool, error). Container can be requested as well. Config can be requested in a form
@@ -16,13 +17,13 @@ var errNoConfig = fmt.Errorf("no config has been provided")
 // implement service.HydrateConfig.
 const InitMethod = "Init"
 
-// Service can serve. Service can provide Init method which must return (bool, error) signature and might accept
+// Service can serve. Services can provide Init method which must return (bool, error) signature and might accept
 // other services and/or configs as dependency.
 type Service interface {
 	// Serve serves.
 	Serve() error
 
-	// Stop stops the service.
+	// Detach stops the service.
 	Stop()
 }
 
@@ -46,6 +47,9 @@ type Container interface {
 
 	// Close all active services.
 	Stop()
+
+	// List service names.
+	List() []string
 }
 
 // Config provides ability to slice configuration sections and unmarshal configuration data into
@@ -76,6 +80,10 @@ type container struct {
 	log      logrus.FieldLogger
 	mu       sync.Mutex
 	services []*entry
+	errc     chan struct {
+		name string
+		err  error
+	}
 }
 
 // NewContainer creates new service container.
@@ -83,6 +91,10 @@ func NewContainer(log logrus.FieldLogger) Container {
 	return &container{
 		log:      log,
 		services: make([]*entry, 0),
+		errc: make(chan struct {
+			name string
+			err  error
+		}, 1),
 	}
 }
 
@@ -94,7 +106,7 @@ func (c *container) Register(name string, service interface{}) {
 	c.services = append(c.services, &entry{
 		name:   name,
 		svc:    service,
-		status: StatusRegistered,
+		status: StatusInactive,
 	})
 }
 
@@ -154,60 +166,69 @@ func (c *container) Init(cfg Config) error {
 
 // Serve all configured services. Non blocking.
 func (c *container) Serve() error {
-	var (
-		numServing = 0
-		done       = make(chan interface{}, len(c.services))
-	)
-
+	var running = 0
 	for _, e := range c.services {
 		if e.hasStatus(StatusOK) && e.canServe() {
-			numServing++
-		} else {
-			continue
+			running++
+			c.log.Debugf("[%s]: started", e.name)
+			go func(e *entry) {
+				e.setStatus(StatusServing)
+				defer e.setStatus(StatusStopped)
+				if err := e.svc.(Service).Serve(); err != nil {
+					c.errc <- struct {
+						name string
+						err  error
+					}{name: e.name, err: errors.Wrap(err, fmt.Sprintf("[%s]", e.name))}
+				} else {
+					c.errc <- struct {
+						name string
+						err  error
+					}{name: e.name, err: errTempFix223}
+				}
+			}(e)
 		}
-
-		c.log.Debugf("[%s]: started", e.name)
-		go func(e *entry) {
-			e.setStatus(StatusServing)
-			defer e.setStatus(StatusStopped)
-
-			if err := e.svc.(Service).Serve(); err != nil {
-				c.log.Errorf("[%s]: %s", e.name, err)
-				done <- errors.Wrap(err, fmt.Sprintf("[%s]", e.name))
-			} else {
-				done <- nil
-			}
-		}(e)
 	}
 
-	for i := 0; i < numServing; i++ {
-		result := <-done
+	// simple handler to handle empty configs
+	if running == 0 {
+		return nil
+	}
 
-		if result == nil {
-			// no errors
-			continue
-		}
-
-		// found an error in one of the services, stopping the rest of running services.
-		if err := result.(error); err != nil {
+	for fail := range c.errc {
+		if fail.err == errTempFix223 {
+			// if we call stop, then stop all plugins
+			break
+		} else {
+			c.log.Errorf("[%s]: %s", fail.name, fail.err)
 			c.Stop()
-			return err
+			return fail.err
 		}
 	}
 
 	return nil
 }
 
-// Stop sends stop command to all running services.
+// Detach sends stop command to all running services.
 func (c *container) Stop() {
 	for _, e := range c.services {
 		if e.hasStatus(StatusServing) {
+			e.setStatus(StatusStopping)
 			e.svc.(Service).Stop()
 			e.setStatus(StatusStopped)
 
 			c.log.Debugf("[%s]: stopped", e.name)
 		}
 	}
+}
+
+// List all service names.
+func (c *container) List() []string {
+	names := make([]string, 0, len(c.services))
+	for _, e := range c.services {
+		names = append(names, e.name)
+	}
+
+	return names
 }
 
 // calls Init method with automatically resolved arguments.
@@ -261,7 +282,10 @@ func (c *container) resolveValues(s interface{}, m reflect.Method, cfg Config) (
 			sc := reflect.New(v.Elem())
 
 			if dsc, ok := sc.Interface().(DefaultsConfig); ok {
-				dsc.InitDefaults()
+				err := dsc.InitDefaults()
+				if err != nil {
+					return nil, err
+				}
 				if cfg == nil {
 					values = append(values, sc)
 					continue

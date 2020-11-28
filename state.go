@@ -14,6 +14,9 @@ type State interface {
 
 	// NumJobs shows how many times worker was invoked
 	NumExecs() int64
+
+	// IsActive returns true if worker not Inactive or Stopped
+	IsActive() bool
 }
 
 const (
@@ -26,8 +29,8 @@ const (
 	// StateWorking - working on given payload.
 	StateWorking
 
-	// StateStreaming - indicates that worker is streaming the data at the moment.
-	StateStreaming
+	// StateInvalid - indicates that worker is being disabled and will be removed.
+	StateInvalid
 
 	// StateStopping - process is being softly stopped.
 	StateStopping
@@ -57,8 +60,8 @@ func (s *state) String() string {
 		return "ready"
 	case StateWorking:
 		return "working"
-	case StateStreaming:
-		return "streaming"
+	case StateInvalid:
+		return "invalid"
 	case StateStopped:
 		return "stopped"
 	case StateErrored:

@@ -1,8 +1,8 @@
 package service
 
 import (
-	"encoding/json"
 	"errors"
+	json "github.com/json-iterator/go"
 	"github.com/sirupsen/logrus"
 	"github.com/sirupsen/logrus/hooks/test"
 	"github.com/stretchr/testify/assert"
@@ -67,17 +67,24 @@ type testCfg struct{ cfg string }
 
 func (cfg *testCfg) Get(name string) Config {
 	vars := make(map[string]interface{})
-	json.Unmarshal([]byte(cfg.cfg), &vars)
+	j := json.ConfigCompatibleWithStandardLibrary
+	err := j.Unmarshal([]byte(cfg.cfg), &vars)
+	if err != nil {
+		panic("error unmarshalling the cfg.cfg value")
+	}
 
 	v, ok := vars[name]
 	if !ok {
 		return nil
 	}
 
-	d, _ := json.Marshal(v)
+	d, _ := j.Marshal(v)
 	return &testCfg{cfg: string(d)}
 }
-func (cfg *testCfg) Unmarshal(out interface{}) error { return json.Unmarshal([]byte(cfg.cfg), out) }
+func (cfg *testCfg) Unmarshal(out interface{}) error {
+	j := json.ConfigCompatibleWithStandardLibrary
+	return j.Unmarshal([]byte(cfg.cfg), out)
+}
 
 // Config defines RPC service config.
 type dConfig struct {
@@ -129,6 +136,20 @@ func TestContainer_Has(t *testing.T) {
 	assert.False(t, c.Has("another"))
 }
 
+func TestContainer_List(t *testing.T) {
+	logger, hook := test.NewNullLogger()
+	logger.SetLevel(logrus.DebugLevel)
+
+	c := NewContainer(logger)
+	c.Register("test", &testService{})
+
+	assert.Equal(t, 0, len(hook.Entries))
+	assert.Equal(t, 1, len(c.List()))
+
+	assert.True(t, c.Has("test"))
+	assert.False(t, c.Has("another"))
+}
+
 func TestContainer_Get(t *testing.T) {
 	logger, hook := test.NewNullLogger()
 	logger.SetLevel(logrus.DebugLevel)
@@ -139,7 +160,7 @@ func TestContainer_Get(t *testing.T) {
 
 	s, st := c.Get("test")
 	assert.IsType(t, &testService{}, s)
-	assert.Equal(t, StatusRegistered, st)
+	assert.Equal(t, StatusInactive, st)
 
 	s, st = c.Get("another")
 	assert.Nil(t, s)
@@ -227,7 +248,7 @@ func TestContainer_ConfigureNull(t *testing.T) {
 
 	s, st := c.Get("test")
 	assert.IsType(t, &testService{}, s)
-	assert.Equal(t, StatusRegistered, st)
+	assert.Equal(t, StatusInactive, st)
 }
 
 func TestContainer_ConfigureDisabled(t *testing.T) {
@@ -245,7 +266,7 @@ func TestContainer_ConfigureDisabled(t *testing.T) {
 
 	s, st := c.Get("test")
 	assert.IsType(t, &testService{}, s)
-	assert.Equal(t, StatusRegistered, st)
+	assert.Equal(t, StatusInactive, st)
 }
 
 func TestContainer_ConfigureError(t *testing.T) {
@@ -268,7 +289,7 @@ func TestContainer_ConfigureError(t *testing.T) {
 
 	s, st := c.Get("test")
 	assert.IsType(t, &testService{}, s)
-	assert.Equal(t, StatusRegistered, st)
+	assert.Equal(t, StatusInactive, st)
 }
 
 func TestContainer_ConfigureTwice(t *testing.T) {
@@ -285,6 +306,7 @@ func TestContainer_ConfigureTwice(t *testing.T) {
 	assert.Error(t, c.Init(&testCfg{`{"test":"something"}`}))
 }
 
+// bug #276 test
 func TestContainer_ServeEmptyContainer(t *testing.T) {
 	logger, hook := test.NewNullLogger()
 	logger.SetLevel(logrus.DebugLevel)
@@ -295,7 +317,10 @@ func TestContainer_ServeEmptyContainer(t *testing.T) {
 	c.Register("test", svc)
 	assert.Equal(t, 0, len(hook.Entries))
 
-	assert.NoError(t, c.Serve())
+	go assert.NoError(t, c.Serve())
+
+	time.Sleep(time.Millisecond * 500)
+
 	c.Stop()
 }
 
@@ -425,6 +450,10 @@ func TestContainer_InitErrorB(t *testing.T) {
 
 type testInitC struct{}
 
+func (r *testInitC) Test() bool {
+	return true
+}
+
 func TestContainer_NoInit(t *testing.T) {
 	logger, _ := test.NewNullLogger()
 	logger.SetLevel(logrus.DebugLevel)
@@ -436,7 +465,7 @@ func TestContainer_NoInit(t *testing.T) {
 }
 
 type testInitD struct {
-	c *testInitC
+	c *testInitC //nolint:golint,unused,structcheck
 }
 
 type DCfg struct {
@@ -448,7 +477,6 @@ func (c *DCfg) Hydrate(cfg Config) error {
 	if err := cfg.Unmarshal(c); err != nil {
 		return err
 	}
-
 	if c.V == "fail" {
 		return errors.New("failed config")
 	}

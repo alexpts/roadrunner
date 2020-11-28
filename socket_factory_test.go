@@ -4,7 +4,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"net"
 	"os/exec"
-	"runtime"
 	"testing"
 	"time"
 )
@@ -14,7 +13,12 @@ func Test_Tcp_Start(t *testing.T) {
 
 	ls, err := net.Listen("tcp", "localhost:9007")
 	if assert.NoError(t, err) {
-		defer ls.Close()
+		defer func() {
+			err := ls.Close()
+			if err != nil {
+				t.Errorf("error closing the listener: error %v", err)
+			}
+		}()
 	} else {
 		t.Skip("socket is busy")
 	}
@@ -29,7 +33,10 @@ func Test_Tcp_Start(t *testing.T) {
 		assert.NoError(t, w.Wait())
 	}()
 
-	w.Stop()
+	err = w.Stop()
+	if err != nil {
+		t.Errorf("error stopping the worker: error %v", err)
+	}
 }
 
 func Test_Tcp_StartCloseFactory(t *testing.T) {
@@ -44,7 +51,12 @@ func Test_Tcp_StartCloseFactory(t *testing.T) {
 	cmd := exec.Command("php", "tests/client.php", "echo", "tcp")
 
 	f := NewSocketFactory(ls, time.Minute)
-	defer f.Close()
+	defer func() {
+		err := ls.Close()
+		if err != nil {
+			t.Errorf("error closing the listener: error %v", err)
+		}
+	}()
 
 	w, err := f.SpawnWorker(cmd)
 	assert.NoError(t, err)
@@ -54,7 +66,10 @@ func Test_Tcp_StartCloseFactory(t *testing.T) {
 		assert.NoError(t, w.Wait())
 	}()
 
-	w.Stop()
+	err = w.Stop()
+	if err != nil {
+		t.Errorf("error stopping the worker: error %v", err)
+	}
 }
 
 func Test_Tcp_StartError(t *testing.T) {
@@ -62,13 +77,21 @@ func Test_Tcp_StartError(t *testing.T) {
 
 	ls, err := net.Listen("tcp", "localhost:9007")
 	if assert.NoError(t, err) {
-		defer ls.Close()
+		defer func() {
+			err := ls.Close()
+			if err != nil {
+				t.Errorf("error closing the listener: error %v", err)
+			}
+		}()
 	} else {
 		t.Skip("socket is busy")
 	}
 
 	cmd := exec.Command("php", "tests/client.php", "echo", "pipes")
-	cmd.Start()
+	err = cmd.Start()
+	if err != nil {
+		t.Errorf("error executing the command: error %v", err)
+	}
 
 	w, err := NewSocketFactory(ls, time.Minute).SpawnWorker(cmd)
 	assert.Error(t, err)
@@ -80,17 +103,22 @@ func Test_Tcp_Failboot(t *testing.T) {
 
 	ls, err := net.Listen("tcp", "localhost:9007")
 	if assert.NoError(t, err) {
-		defer ls.Close()
+		defer func() {
+			err3 := ls.Close()
+			if err3 != nil {
+				t.Errorf("error closing the listener: error %v", err3)
+			}
+		}()
 	} else {
 		t.Skip("socket is busy")
 	}
 
 	cmd := exec.Command("php", "tests/failboot.php")
 
-	w, err := NewSocketFactory(ls, time.Minute).SpawnWorker(cmd)
+	w, err2 := NewSocketFactory(ls, time.Minute).SpawnWorker(cmd)
 	assert.Nil(t, w)
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "failboot")
+	assert.Error(t, err2)
+	assert.Contains(t, err2.Error(), "failboot")
 }
 
 func Test_Tcp_Timeout(t *testing.T) {
@@ -98,7 +126,12 @@ func Test_Tcp_Timeout(t *testing.T) {
 
 	ls, err := net.Listen("tcp", "localhost:9007")
 	if assert.NoError(t, err) {
-		defer ls.Close()
+		defer func() {
+			err := ls.Close()
+			if err != nil {
+				t.Errorf("error closing the listener: error %v", err)
+			}
+		}()
 	} else {
 		t.Skip("socket is busy")
 	}
@@ -116,7 +149,12 @@ func Test_Tcp_Invalid(t *testing.T) {
 
 	ls, err := net.Listen("tcp", "localhost:9007")
 	if assert.NoError(t, err) {
-		defer ls.Close()
+		defer func() {
+			err := ls.Close()
+			if err != nil {
+				t.Errorf("error closing the listener: error %v", err)
+			}
+		}()
 	} else {
 		t.Skip("socket is busy")
 	}
@@ -133,7 +171,12 @@ func Test_Tcp_Broken(t *testing.T) {
 
 	ls, err := net.Listen("tcp", "localhost:9007")
 	if assert.NoError(t, err) {
-		defer ls.Close()
+		defer func() {
+			err := ls.Close()
+			if err != nil {
+				t.Errorf("error closing the listener: error %v", err)
+			}
+		}()
 	} else {
 		t.Skip("socket is busy")
 	}
@@ -147,7 +190,12 @@ func Test_Tcp_Broken(t *testing.T) {
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "undefined_function()")
 	}()
-	defer w.Stop()
+
+	defer func() {
+		time.Sleep(time.Second)
+		err2 := w.Stop()
+		assert.NoError(t, err2)
+	}()
 
 	res, err := w.Exec(&Payload{Body: []byte("hello")})
 
@@ -160,7 +208,12 @@ func Test_Tcp_Echo(t *testing.T) {
 
 	ls, err := net.Listen("tcp", "localhost:9007")
 	if assert.NoError(t, err) {
-		defer ls.Close()
+		defer func() {
+			err := ls.Close()
+			if err != nil {
+				t.Errorf("error closing the listener: error %v", err)
+			}
+		}()
 	} else {
 		t.Skip("socket is busy")
 	}
@@ -171,7 +224,12 @@ func Test_Tcp_Echo(t *testing.T) {
 	go func() {
 		assert.NoError(t, w.Wait())
 	}()
-	defer w.Stop()
+	defer func() {
+		err = w.Stop()
+		if err != nil {
+			t.Errorf("error stopping the worker: error %v", err)
+		}
+	}()
 
 	res, err := w.Exec(&Payload{Body: []byte("hello")})
 
@@ -184,13 +242,14 @@ func Test_Tcp_Echo(t *testing.T) {
 }
 
 func Test_Unix_Start(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("not supported on " + runtime.GOOS)
-	}
-
 	ls, err := net.Listen("unix", "sock.unix")
 	if err == nil {
-		defer ls.Close()
+		defer func() {
+			err := ls.Close()
+			if err != nil {
+				t.Errorf("error closing the listener: error %v", err)
+			}
+		}()
 	} else {
 		t.Skip("socket is busy")
 	}
@@ -205,17 +264,21 @@ func Test_Unix_Start(t *testing.T) {
 		assert.NoError(t, w.Wait())
 	}()
 
-	w.Stop()
+	err = w.Stop()
+	if err != nil {
+		t.Errorf("error stopping the worker: error %v", err)
+	}
 }
 
 func Test_Unix_Failboot(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("not supported on " + runtime.GOOS)
-	}
-
 	ls, err := net.Listen("unix", "sock.unix")
 	if err == nil {
-		defer ls.Close()
+		defer func() {
+			err := ls.Close()
+			if err != nil {
+				t.Errorf("error closing the listener: error %v", err)
+			}
+		}()
 	} else {
 		t.Skip("socket is busy")
 	}
@@ -229,13 +292,14 @@ func Test_Unix_Failboot(t *testing.T) {
 }
 
 func Test_Unix_Timeout(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("not supported on " + runtime.GOOS)
-	}
-
 	ls, err := net.Listen("unix", "sock.unix")
 	if err == nil {
-		defer ls.Close()
+		defer func() {
+			err := ls.Close()
+			if err != nil {
+				t.Errorf("error closing the listener: error %v", err)
+			}
+		}()
 	} else {
 		t.Skip("socket is busy")
 	}
@@ -249,13 +313,14 @@ func Test_Unix_Timeout(t *testing.T) {
 }
 
 func Test_Unix_Invalid(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("not supported on " + runtime.GOOS)
-	}
-
 	ls, err := net.Listen("unix", "sock.unix")
 	if err == nil {
-		defer ls.Close()
+		defer func() {
+			err := ls.Close()
+			if err != nil {
+				t.Errorf("error closing the listener: error %v", err)
+			}
+		}()
 	} else {
 		t.Skip("socket is busy")
 	}
@@ -268,13 +333,14 @@ func Test_Unix_Invalid(t *testing.T) {
 }
 
 func Test_Unix_Broken(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("not supported on " + runtime.GOOS)
-	}
-
 	ls, err := net.Listen("unix", "sock.unix")
 	if err == nil {
-		defer ls.Close()
+		defer func() {
+			err := ls.Close()
+			if err != nil {
+				t.Errorf("error closing the listener: error %v", err)
+			}
+		}()
 	} else {
 		t.Skip("socket is busy")
 	}
@@ -284,11 +350,15 @@ func Test_Unix_Broken(t *testing.T) {
 	w, _ := NewSocketFactory(ls, time.Minute).SpawnWorker(cmd)
 	go func() {
 		err := w.Wait()
-
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "undefined_function()")
 	}()
-	defer w.Stop()
+
+	defer func() {
+		time.Sleep(time.Second)
+		err = w.Stop()
+		assert.NoError(t, err)
+	}()
 
 	res, err := w.Exec(&Payload{Body: []byte("hello")})
 
@@ -297,13 +367,14 @@ func Test_Unix_Broken(t *testing.T) {
 }
 
 func Test_Unix_Echo(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("not supported on " + runtime.GOOS)
-	}
-
 	ls, err := net.Listen("unix", "sock.unix")
 	if err == nil {
-		defer ls.Close()
+		defer func() {
+			err := ls.Close()
+			if err != nil {
+				t.Errorf("error closing the listener: error %v", err)
+			}
+		}()
 	} else {
 		t.Skip("socket is busy")
 	}
@@ -314,7 +385,12 @@ func Test_Unix_Echo(t *testing.T) {
 	go func() {
 		assert.NoError(t, w.Wait())
 	}()
-	defer w.Stop()
+	defer func() {
+		err = w.Stop()
+		if err != nil {
+			t.Errorf("error stopping the worker: error %v", err)
+		}
+	}()
 
 	res, err := w.Exec(&Payload{Body: []byte("hello")})
 
@@ -329,7 +405,12 @@ func Test_Unix_Echo(t *testing.T) {
 func Benchmark_Tcp_SpawnWorker_Stop(b *testing.B) {
 	ls, err := net.Listen("tcp", "localhost:9007")
 	if err == nil {
-		defer ls.Close()
+		defer func() {
+			err := ls.Close()
+			if err != nil {
+				b.Errorf("error closing the listener: error %v", err)
+			}
+		}()
 	} else {
 		b.Skip("socket is busy")
 	}
@@ -345,14 +426,22 @@ func Benchmark_Tcp_SpawnWorker_Stop(b *testing.B) {
 			}
 		}()
 
-		w.Stop()
+		err = w.Stop()
+		if err != nil {
+			b.Errorf("error stopping the worker: error %v", err)
+		}
 	}
 }
 
 func Benchmark_Tcp_Worker_ExecEcho(b *testing.B) {
 	ls, err := net.Listen("tcp", "localhost:9007")
 	if err == nil {
-		defer ls.Close()
+		defer func() {
+			err := ls.Close()
+			if err != nil {
+				b.Errorf("error closing the listener: error %v", err)
+			}
+		}()
 	} else {
 		b.Skip("socket is busy")
 	}
@@ -361,9 +450,17 @@ func Benchmark_Tcp_Worker_ExecEcho(b *testing.B) {
 
 	w, _ := NewSocketFactory(ls, time.Minute).SpawnWorker(cmd)
 	go func() {
-		w.Wait()
+		err := w.Wait()
+		if err != nil {
+			b.Errorf("error waiting: %v", err)
+		}
 	}()
-	defer w.Stop()
+	defer func() {
+		err = w.Stop()
+		if err != nil {
+			b.Errorf("error stopping the worker: error %v", err)
+		}
+	}()
 
 	for n := 0; n < b.N; n++ {
 		if _, err := w.Exec(&Payload{Body: []byte("hello")}); err != nil {
@@ -373,13 +470,14 @@ func Benchmark_Tcp_Worker_ExecEcho(b *testing.B) {
 }
 
 func Benchmark_Unix_SpawnWorker_Stop(b *testing.B) {
-	if runtime.GOOS == "windows" {
-		b.Skip("not supported on " + runtime.GOOS)
-	}
-
 	ls, err := net.Listen("unix", "sock.unix")
 	if err == nil {
-		defer ls.Close()
+		defer func() {
+			err := ls.Close()
+			if err != nil {
+				b.Errorf("error closing the listener: error %v", err)
+			}
+		}()
 	} else {
 		b.Skip("socket is busy")
 	}
@@ -395,18 +493,22 @@ func Benchmark_Unix_SpawnWorker_Stop(b *testing.B) {
 			}
 		}()
 
-		w.Stop()
+		err = w.Stop()
+		if err != nil {
+			b.Errorf("error stopping the worker: error %v", err)
+		}
 	}
 }
 
 func Benchmark_Unix_Worker_ExecEcho(b *testing.B) {
-	if runtime.GOOS == "windows" {
-		b.Skip("not supported on " + runtime.GOOS)
-	}
-
 	ls, err := net.Listen("unix", "sock.unix")
 	if err == nil {
-		defer ls.Close()
+		defer func() {
+			err := ls.Close()
+			if err != nil {
+				b.Errorf("error closing the listener: error %v", err)
+			}
+		}()
 	} else {
 		b.Skip("socket is busy")
 	}
@@ -415,9 +517,17 @@ func Benchmark_Unix_Worker_ExecEcho(b *testing.B) {
 
 	w, _ := NewSocketFactory(ls, time.Minute).SpawnWorker(cmd)
 	go func() {
-		w.Wait()
+		err := w.Wait()
+		if err != nil {
+			b.Errorf("error waiting: %v", err)
+		}
 	}()
-	defer w.Stop()
+	defer func() {
+		err = w.Stop()
+		if err != nil {
+			b.Errorf("error stopping the worker: error %v", err)
+		}
+	}()
 
 	for n := 0; n < b.N; n++ {
 		if _, err := w.Exec(&Payload{Body: []byte("hello")}); err != nil {

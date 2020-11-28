@@ -1,14 +1,17 @@
 <?php
+
 /**
  * High-performance PHP process supervisor and load balancer written in Go
  *
  * @author Wolfy-J
  */
+declare(strict_types=1);
 
 namespace Spiral\RoadRunner;
 
 use Spiral\Goridge\Exceptions\GoridgeException;
 use Spiral\Goridge\RelayInterface as Relay;
+use Spiral\Goridge\SendPackageRelayInterface;
 use Spiral\RoadRunner\Exception\RoadRunnerException;
 
 /**
@@ -24,7 +27,7 @@ use Spiral\RoadRunner\Exception\RoadRunnerException;
 class Worker
 {
     // Send as response context to request worker termination
-    const STOP = '{"stop":true}';
+    public const STOP = '{"stop":true}';
 
     /** @var Relay */
     private $relay;
@@ -64,7 +67,7 @@ class Worker
         }
 
         if ($flags & Relay::PAYLOAD_ERROR) {
-            return new \Error($body);
+            return new \Error((string)$body);
         }
 
         return $body;
@@ -79,15 +82,24 @@ class Worker
      * @param string|null $payload
      * @param string|null $header
      */
-    public function send(string $payload = null, string $header = null)
+    public function send(string $payload = null, string $header = null): void
     {
-        if (is_null($header)) {
-            $this->relay->send($header, Relay::PAYLOAD_CONTROL | Relay::PAYLOAD_NONE);
-        } else {
-            $this->relay->send($header, Relay::PAYLOAD_CONTROL | Relay::PAYLOAD_RAW);
-        }
+        if (!$this->relay instanceof SendPackageRelayInterface) {
+            if ($header === null) {
+                $this->relay->send('', Relay::PAYLOAD_CONTROL | Relay::PAYLOAD_NONE);
+            } else {
+                $this->relay->send($header, Relay::PAYLOAD_CONTROL | Relay::PAYLOAD_RAW);
+            }
 
-        $this->relay->send($payload, Relay::PAYLOAD_RAW);
+            $this->relay->send((string)$payload, Relay::PAYLOAD_RAW);
+        } else {
+            $this->relay->sendPackage(
+                (string)$header,
+                Relay::PAYLOAD_CONTROL | ($header === null ? Relay::PAYLOAD_NONE : Relay::PAYLOAD_RAW),
+                (string)$payload,
+                Relay::PAYLOAD_RAW
+            );
+        }
     }
 
     /**
@@ -100,7 +112,7 @@ class Worker
      *
      * @param string $message
      */
-    public function error(string $message)
+    public function error(string $message): void
     {
         $this->relay->send(
             $message,
@@ -117,7 +129,7 @@ class Worker
      *
      * @throws GoridgeException
      */
-    public function stop()
+    public function stop(): void
     {
         $this->send(null, self::STOP);
     }
@@ -132,23 +144,24 @@ class Worker
      *
      * @throws RoadRunnerException
      */
-    private function handleControl(string $body = null, &$header = null, int $flags): bool
+    private function handleControl(string $body = null, &$header = null, int $flags = 0): bool
     {
         $header = $body;
-        if (is_null($body) || $flags & Relay::PAYLOAD_RAW) {
+        if ($body === null || $flags & Relay::PAYLOAD_RAW) {
             // empty or raw prefix
             return true;
         }
 
         $p = json_decode($body, true);
         if ($p === false) {
-            throw new RoadRunnerException("invalid task context, JSON payload is expected");
+            throw new RoadRunnerException('invalid task context, JSON payload is expected');
         }
 
         // PID negotiation (socket connections only)
         if (!empty($p['pid'])) {
             $this->relay->send(
-                sprintf('{"pid":%s}', getmypid()), Relay::PAYLOAD_CONTROL
+                sprintf('{"pid":%s}', getmypid()),
+                Relay::PAYLOAD_CONTROL
             );
         }
 

@@ -2,11 +2,12 @@ package roadrunner
 
 import (
 	"fmt"
-	"github.com/pkg/errors"
 	"os/exec"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/pkg/errors"
 )
 
 const (
@@ -40,6 +41,9 @@ type StaticPool struct {
 
 	// all registered workers
 	workers []*Worker
+
+	// invalid declares set of workers to be removed from the pool.
+	remove sync.Map
 
 	// pool is being destroyed
 	inDestroy int32
@@ -80,7 +84,7 @@ func NewPool(cmd func() *exec.Cmd, factory Factory, cfg Config) (*StaticPool, er
 	return p, nil
 }
 
-// Listen attaches pool event watcher.
+// Listen attaches pool event controller.
 func (p *StaticPool) Listen(l func(event int, ctx interface{})) {
 	p.mul.Lock()
 	defer p.mul.Unlock()
@@ -104,11 +108,24 @@ func (p *StaticPool) Workers() (workers []*Worker) {
 	p.muw.RLock()
 	defer p.muw.RUnlock()
 
-	for _, w := range p.workers {
-		workers = append(workers, w)
-	}
+	workers = append(workers, p.workers...)
 
 	return workers
+}
+
+// Remove forces pool to remove specific worker.
+func (p *StaticPool) Remove(w *Worker, err error) bool {
+	if w.State().Value() != StateReady && w.State().Value() != StateWorking {
+		// unable to remove inactive worker
+		return false
+	}
+
+	if _, ok := p.remove.Load(w); ok {
+		return false
+	}
+
+	p.remove.Store(w, err)
+	return true
 }
 
 // Exec one task with given payload and context, returns result or error.
@@ -133,13 +150,13 @@ func (p *StaticPool) Exec(rqs *Payload) (rsp *Payload, err error) {
 			return nil, err
 		}
 
-		go p.destroyWorker(w, err)
+		p.discardWorker(w, err)
 		return nil, err
 	}
 
 	// worker want's to be terminated
 	if rsp.Body == nil && rsp.Context != nil && string(rsp.Context) == StopRequest {
-		go p.destroyWorker(w, err)
+		p.discardWorker(w, err)
 		return p.Exec(rqs)
 	}
 
@@ -152,13 +169,14 @@ func (p *StaticPool) Destroy() {
 	atomic.AddInt32(&p.inDestroy, 1)
 
 	p.tmu.Lock()
-	close(p.destroy)
 	p.tasks.Wait()
+	close(p.destroy)
 	p.tmu.Unlock()
 
 	var wg sync.WaitGroup
 	for _, w := range p.Workers() {
 		wg.Add(1)
+		w.markInvalid()
 		go func(w *Worker) {
 			defer wg.Done()
 			p.destroyWorker(w, nil)
@@ -170,6 +188,7 @@ func (p *StaticPool) Destroy() {
 
 // finds free worker in a given time interval. Skips dead workers.
 func (p *StaticPool) allocateWorker() (w *Worker, err error) {
+	// TODO loop counts upward, but its variable is bounded downward.
 	for i := atomic.LoadInt64(&p.numDead); i >= 0; i++ {
 		// this loop is required to skip issues with dead workers still being in a ring
 		// (we know how many workers).
@@ -178,6 +197,14 @@ func (p *StaticPool) allocateWorker() (w *Worker, err error) {
 			if w.State().Value() != StateReady {
 				// found expected dead worker
 				atomic.AddInt64(&p.numDead, ^int64(0))
+				continue
+			}
+
+			if err, remove := p.remove.Load(w); remove {
+				p.discardWorker(w, err)
+
+				// get next worker
+				i++
 				continue
 			}
 
@@ -199,8 +226,19 @@ func (p *StaticPool) allocateWorker() (w *Worker, err error) {
 				atomic.AddInt64(&p.numDead, ^int64(0))
 				continue
 			}
+
+			if err, remove := p.remove.Load(w); remove {
+				p.discardWorker(w, err)
+
+				// get next worker
+				i++
+				continue
+			}
+
 			return w, nil
 		case <-p.destroy:
+			timeout.Stop()
+
 			return nil, fmt.Errorf("pool has been stopped")
 		}
 	}
@@ -211,7 +249,12 @@ func (p *StaticPool) allocateWorker() (w *Worker, err error) {
 // release releases or replaces the worker.
 func (p *StaticPool) release(w *Worker) {
 	if p.cfg.MaxJobs != 0 && w.State().NumExecs() >= p.cfg.MaxJobs {
-		go p.destroyWorker(w, p.cfg.MaxJobs)
+		p.discardWorker(w, p.cfg.MaxJobs)
+		return
+	}
+
+	if err, remove := p.remove.Load(w); remove {
+		p.discardWorker(w, err)
 		return
 	}
 
@@ -242,9 +285,21 @@ func (p *StaticPool) createWorker() (*Worker, error) {
 	return w, nil
 }
 
+// gentry remove worker
+func (p *StaticPool) discardWorker(w *Worker, caused interface{}) {
+	w.markInvalid()
+	go p.destroyWorker(w, caused)
+}
+
 // destroyWorker destroys workers and removes it from the pool.
+// TODO caused unused
 func (p *StaticPool) destroyWorker(w *Worker, caused interface{}) {
-	go w.Stop()
+	go func() {
+		err := w.Stop()
+		if err != nil {
+			p.throw(EventWorkerError, WorkerError{Worker: w, Caused: err})
+		}
+	}()
 
 	select {
 	case <-w.waitDone:
@@ -271,6 +326,7 @@ func (p *StaticPool) watchWorker(w *Worker) {
 	for i, wc := range p.workers {
 		if wc == w {
 			p.workers = append(p.workers[:i], p.workers[i+1:]...)
+			p.remove.Delete(w)
 			break
 		}
 	}
@@ -307,9 +363,8 @@ func (p *StaticPool) destroyed() bool {
 // throw invokes event handler if any.
 func (p *StaticPool) throw(event int, ctx interface{}) {
 	p.mul.Lock()
-	defer p.mul.Unlock()
-
 	if p.lsn != nil {
 		p.lsn(event, ctx)
 	}
+	p.mul.Unlock()
 }

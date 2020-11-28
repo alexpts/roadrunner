@@ -3,18 +3,29 @@ package roadrunner
 import (
 	"errors"
 	"fmt"
+	"github.com/spiral/roadrunner/osutil"
 	"net"
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
+
+// CommandProducer can produce commands.
+type CommandProducer func(cfg *ServerConfig) func() *exec.Cmd
 
 // ServerConfig config combines factory, pool and cmd configurations.
 type ServerConfig struct {
 	// Command includes command strings with all the parameters, example: "php worker.php pipes".
 	Command string
+
+	// User under which process will be started
+	User string
+
+	// CommandProducer overwrites
+	CommandProducer CommandProducer
 
 	// Relay defines connection method and factory to be used to connect to workers:
 	// "pipes", "tcp://:6001", "unix://rr.sock"
@@ -30,7 +41,8 @@ type ServerConfig struct {
 	Pool *Config
 
 	// values defines set of values to be passed to the command context.
-	env []string
+	mu  sync.Mutex
+	env map[string]string
 }
 
 // InitDefaults sets missing values to their default values.
@@ -67,16 +79,54 @@ func (cfg *ServerConfig) Differs(new *ServerConfig) bool {
 
 // SetEnv sets new environment variable. Value is automatically uppercase-d.
 func (cfg *ServerConfig) SetEnv(k, v string) {
-	cfg.env = append(cfg.env, fmt.Sprintf("%s=%s", strings.ToUpper(k), v))
+	cfg.mu.Lock()
+	defer cfg.mu.Unlock()
+
+	if cfg.env == nil {
+		cfg.env = make(map[string]string)
+	}
+
+	cfg.env[k] = v
 }
 
-// makeCommands returns new command provider based on configured options.
+// GetEnv must return list of env variables.
+func (cfg *ServerConfig) GetEnv() (env []string) {
+	env = append(os.Environ(), fmt.Sprintf("RR_RELAY=%s", cfg.Relay))
+	for k, v := range cfg.env {
+		env = append(env, fmt.Sprintf("%s=%s", strings.ToUpper(k), v))
+	}
+
+	return
+}
+
+//=================================== PRIVATE METHODS ======================================================
+
 func (cfg *ServerConfig) makeCommand() func() *exec.Cmd {
-	var cmd = strings.Split(cfg.Command, " ")
+	cfg.mu.Lock()
+	defer cfg.mu.Unlock()
+
+	if cfg.CommandProducer != nil {
+		return cfg.CommandProducer(cfg)
+	}
+
+	var cmdArgs []string
+	cmdArgs = append(cmdArgs, strings.Split(cfg.Command, " ")...)
+
 	return func() *exec.Cmd {
-		cmd := exec.Command(cmd[0], cmd[1:]...)
-		cmd.Env = append(os.Environ(), fmt.Sprintf("RR_RELAY=%s", cfg.Relay))
-		cmd.Env = append(cmd.Env, cfg.env...)
+		cmd := exec.Command(cmdArgs[0], cmdArgs[1:]...)
+		osutil.IsolateProcess(cmd)
+
+		// if user is not empty, and OS is linux or macos
+		// execute php worker from that particular user
+		if cfg.User != "" {
+			err := osutil.ExecuteFromUser(cmd, cfg.User)
+			if err != nil {
+				return nil
+			}
+		}
+
+		cmd.Env = cfg.GetEnv()
+
 		return cmd
 	}
 }
@@ -92,8 +142,11 @@ func (cfg *ServerConfig) makeFactory() (Factory, error) {
 		return nil, errors.New("invalid relay DSN (pipes, tcp://:6001, unix://rr.sock)")
 	}
 
-	if dsn[0] == "unix" {
-		syscall.Unlink(dsn[1])
+	if dsn[0] == "unix" && fileExists(dsn[1]) {
+		err := syscall.Unlink(dsn[1])
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	ln, err := net.Listen(dsn[0], dsn[1])
@@ -102,4 +155,14 @@ func (cfg *ServerConfig) makeFactory() (Factory, error) {
 	}
 
 	return NewSocketFactory(ln, cfg.RelayTimeout), nil
+}
+
+// fileExists checks if a file exists and is not a directory before we
+// try using it to prevent further errors.
+func fileExists(filename string) bool {
+	info, err := os.Stat(filename)
+	if os.IsNotExist(err) {
+		return false
+	}
+	return !info.IsDir()
 }

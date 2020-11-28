@@ -16,6 +16,16 @@ type Config struct {
 	// Forbid specifies list of file extensions which are forbidden for access.
 	// Example: .php, .exe, .bat, .htaccess and etc.
 	Forbid []string
+
+	// Always specifies list of extensions which must always be served by static
+	// service, even if file not found.
+	Always []string
+
+	// Request headers to add to every static.
+	Request map[string]string
+
+	// Response headers to add to every static.
+	Response map[string]string
 }
 
 // Hydrate must populate Config values using given Config source. Must return error if Config is not valid.
@@ -45,11 +55,24 @@ func (c *Config) Valid() error {
 	return nil
 }
 
-// Forbids must return true if file extension is not allowed for the upload.
-func (c *Config) Forbids(filename string) bool {
+// AlwaysForbid must return true if file extension is not allowed for the upload.
+func (c *Config) AlwaysForbid(filename string) bool {
 	ext := strings.ToLower(path.Ext(filename))
 
 	for _, v := range c.Forbid {
+		if ext == v {
+			return true
+		}
+	}
+
+	return false
+}
+
+// AlwaysServe must indicate that file is expected to be served by static service.
+func (c *Config) AlwaysServe(filename string) bool {
+	ext := strings.ToLower(path.Ext(filename))
+
+	for _, v := range c.Always {
 		if ext == v {
 			return true
 		}

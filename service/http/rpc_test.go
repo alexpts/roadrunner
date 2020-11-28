@@ -1,14 +1,13 @@
 package http
 
 import (
-	"encoding/json"
+	json "github.com/json-iterator/go"
 	"github.com/sirupsen/logrus"
 	"github.com/sirupsen/logrus/hooks/test"
 	"github.com/spiral/roadrunner/service"
 	"github.com/spiral/roadrunner/service/rpc"
 	"github.com/stretchr/testify/assert"
 	"os"
-	"runtime"
 	"strconv"
 	"testing"
 	"time"
@@ -26,8 +25,8 @@ func Test_RPC(t *testing.T) {
 		rpcCfg: `{"enable":true, "listen":"tcp://:5004"}`,
 		httpCfg: `{
 			"enable": true,
-			"address": ":6029",
-			"maxRequest": 1024,
+			"address": ":16031",
+			"maxRequestSize": 1024,
 			"uploads": {
 				"dir": ` + tmpDir() + `,
 				"forbid": []
@@ -49,11 +48,19 @@ func Test_RPC(t *testing.T) {
 	s2, _ := c.Get(rpc.ID)
 	rs := s2.(*rpc.Service)
 
-	go func() { c.Serve() }()
-	time.Sleep(time.Millisecond * 100)
-	defer c.Stop()
+	go func() {
+		err := c.Serve()
+		if err != nil {
+			t.Errorf("error during the Serve: error %v", err)
+		}
+	}()
 
-	res, _, _ := get("http://localhost:6029")
+	time.Sleep(time.Second)
+
+	res, _, err := get("http://localhost:16031")
+	if err != nil {
+		t.Fatal(err)
+	}
 	assert.Equal(t, strconv.Itoa(*ss.rr.Workers()[0].Pid), res)
 
 	cl, err := rs.Client()
@@ -63,16 +70,16 @@ func Test_RPC(t *testing.T) {
 	assert.NoError(t, cl.Call("http.Reset", true, &r))
 	assert.Equal(t, "OK", r)
 
-	res2, _, _ := get("http://localhost:6029")
+	res2, _, err := get("http://localhost:16031")
+	if err != nil {
+		t.Fatal(err)
+	}
 	assert.Equal(t, strconv.Itoa(*ss.rr.Workers()[0].Pid), res2)
 	assert.NotEqual(t, res, res2)
+	c.Stop()
 }
 
 func Test_RPC_Unix(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("not supported on " + runtime.GOOS)
-	}
-
 	logger, _ := test.NewNullLogger()
 	logger.SetLevel(logrus.DebugLevel)
 
@@ -81,14 +88,15 @@ func Test_RPC_Unix(t *testing.T) {
 	c.Register(ID, &Service{})
 
 	sock := `unix://` + os.TempDir() + `/rpc.unix`
-	j, _ := json.Marshal(sock)
+	j := json.ConfigCompatibleWithStandardLibrary
+	data, _ := j.Marshal(sock)
 
 	assert.NoError(t, c.Init(&testCfg{
-		rpcCfg: `{"enable":true, "listen":` + string(j) + `}`,
+		rpcCfg: `{"enable":true, "listen":` + string(data) + `}`,
 		httpCfg: `{
 			"enable": true,
-			"address": ":6029",
-			"maxRequest": 1024,
+			"address": ":6032",
+			"maxRequestSize": 1024,
 			"uploads": {
 				"dir": ` + tmpDir() + `,
 				"forbid": []
@@ -110,23 +118,45 @@ func Test_RPC_Unix(t *testing.T) {
 	s2, _ := c.Get(rpc.ID)
 	rs := s2.(*rpc.Service)
 
-	go func() { c.Serve() }()
-	time.Sleep(time.Millisecond * 100)
-	defer c.Stop()
+	go func() {
+		err := c.Serve()
+		if err != nil {
+			t.Errorf("error during the Serve: error %v", err)
+		}
+	}()
 
-	res, _, _ := get("http://localhost:6029")
-	assert.Equal(t, strconv.Itoa(*ss.rr.Workers()[0].Pid), res)
+	time.Sleep(time.Millisecond * 500)
+
+	res, _, err := get("http://localhost:6032")
+	if err != nil {
+		c.Stop()
+		t.Fatal(err)
+	}
+	if ss.rr.Workers() != nil && len(ss.rr.Workers()) > 0 {
+		assert.Equal(t, strconv.Itoa(*ss.rr.Workers()[0].Pid), res)
+	} else {
+		c.Stop()
+		t.Fatal("no workers initialized")
+	}
 
 	cl, err := rs.Client()
-	assert.NoError(t, err)
+	if err != nil {
+		c.Stop()
+		t.Fatal(err)
+	}
 
 	r := ""
 	assert.NoError(t, cl.Call("http.Reset", true, &r))
 	assert.Equal(t, "OK", r)
 
-	res2, _, _ := get("http://localhost:6029")
+	res2, _, err := get("http://localhost:6032")
+	if err != nil {
+		c.Stop()
+		t.Fatal(err)
+	}
 	assert.Equal(t, strconv.Itoa(*ss.rr.Workers()[0].Pid), res2)
 	assert.NotEqual(t, res, res2)
+	c.Stop()
 }
 
 func Test_Workers(t *testing.T) {
@@ -141,8 +171,8 @@ func Test_Workers(t *testing.T) {
 		rpcCfg: `{"enable":true, "listen":"tcp://:5005"}`,
 		httpCfg: `{
 			"enable": true,
-			"address": ":6029",
-			"maxRequest": 1024,
+			"address": ":6033",
+			"maxRequestSize": 1024,
 			"uploads": {
 				"dir": ` + tmpDir() + `,
 				"forbid": []
@@ -164,9 +194,13 @@ func Test_Workers(t *testing.T) {
 	s2, _ := c.Get(rpc.ID)
 	rs := s2.(*rpc.Service)
 
-	go func() { c.Serve() }()
-	time.Sleep(time.Millisecond * 100)
-	defer c.Stop()
+	go func() {
+		err := c.Serve()
+		if err != nil {
+			t.Errorf("error during the Serve: error %v", err)
+		}
+	}()
+	time.Sleep(time.Millisecond * 500)
 
 	cl, err := rs.Client()
 	assert.NoError(t, err)
@@ -176,6 +210,7 @@ func Test_Workers(t *testing.T) {
 	assert.Len(t, r.Workers, 1)
 
 	assert.Equal(t, *ss.rr.Workers()[0].Pid, r.Workers[0].Pid)
+	c.Stop()
 }
 
 func Test_Errors(t *testing.T) {
